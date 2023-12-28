@@ -53,6 +53,10 @@ class Comparable(Protocol):
         valid_items = filter(lambda x: not x[0].startswith("_"), self.__dict__.items())
         return ",".join(list(map(lambda x: F"{x[0]}={x[1]}", valid_items)))
 
+    @property
+    def _items(self) -> dict:
+        return dict(list(filter(lambda x: not x[0].startswith("_"), self.__dict__.items())))
+
     def __repr__(self) -> str:
         return f"<{self.__class__.__name__} {self._get_args()}>"
 
