@@ -185,6 +185,10 @@ def depedendencies_resolved(deps: Dependency) -> bool:
 
 
 class Task(Comparable):
+    @property
+    def _logger(self):
+        return logging.Logger(self.__class__.__name__)
+
     def depends(self) -> Dependency:
         return []
 
@@ -220,86 +224,86 @@ class Task(Comparable):
                 if isinstance(dep, Task):
                     dep.delete(recursive=recursive)
 
-    def remote(self, ip: str, username: str, workdir: Union[str, Path], pem: Optional[Union[str, Path]] = None, executable: str = "python3"):
-        client = ssh.get_client(ip, username, pem=pem)
+    # def remote(self, ip: str, username: str, workdir: Union[str, Path], pem: Optional[Union[str, Path]] = None, executable: str = "python3"):
+    #     client = ssh.get_client(ip, username, pem=pem)
 
-        copy_task = copy.deepcopy(self)
+    #     copy_task = copy.deepcopy(self)
 
-        # sync dependencies
-        for dep in to_list(copy_task.depends()):
-            if isinstance(dep, Target):
-                # sync local target to remote target
-                targets = [dep]
-            elif isinstance(dep, Task):
-                targets = to_list(dep.target())
-            else:
-                targets = []
+    #     # sync dependencies
+    #     for dep in to_list(copy_task.depends()):
+    #         if isinstance(dep, Target):
+    #             # sync local target to remote target
+    #             targets = [dep]
+    #         elif isinstance(dep, Task):
+    #             targets = to_list(dep.target())
+    #         else:
+    #             targets = []
 
-            for target in targets:
-                if isinstance(target, LocalTarget):
-                    if not target.exists():
-                        raise Exception(f"could not find dependency {target}")
+    #         for target in targets:
+    #             if isinstance(target, LocalTarget):
+    #                 if not target.exists():
+    #                     raise Exception(f"could not find dependency {target}")
 
-                    remote_target = LocalTarget(str(target.path.absolute()) + ".copy")
-                    logger.debug(f"=> syncing target {target} to {remote_target}")
-                    ssh.upload_file(client, target.path, remote_target.path)
-                    target.path = remote_target.path
+    #                 remote_target = LocalTarget(str(target.path.absolute()) + ".copy")
+    #                 logger.debug(f"=> syncing target {target} to {remote_target}")
+    #                 ssh.upload_file(client, target.path, remote_target.path)
+    #                 target.path = remote_target.path
 
-                elif isinstance(target, S3Target):
-                    logger.debug(f"not syncing target {target}")
+    #             elif isinstance(target, S3Target):
+    #                 logger.debug(f"not syncing target {target}")
 
-        # execute command python pickled task remotly
+    #     # execute command python pickled task remotly
 
-        # recreate environment
-        # _, _, stderr = client.exec_command(f"ls {environment}")
-        # environment_exists = len(stderr.readlines()) == 0
+    #     # recreate environment
+    #     # _, _, stderr = client.exec_command(f"ls {environment}")
+    #     # environment_exists = len(stderr.readlines()) == 0
 
-        # if not environment_exists:
-        #     # create environment
-        #     print("environment does not exist")
+    #     # if not environment_exists:
+    #     #     # create environment
+    #     #     print("environment does not exist")
 
-        # serialize object pickle
-        path = f"/tmp/remote_task_{self.__class__.__name__}__{encode_short(self._get_args())}.pkl"
-        remote_path = f"/tmp/task_{self.__class__.__name__}__{encode_short(copy_task._get_args())}.pkl"
-        remote_result_path = remote_path + '.result'
+    #     # serialize object pickle
+    #     path = f"/tmp/remote_task_{self.__class__.__name__}__{encode_short(self._get_args())}.pkl"
+    #     remote_path = f"/tmp/task_{self.__class__.__name__}__{encode_short(copy_task._get_args())}.pkl"
+    #     remote_result_path = remote_path + '.result'
 
-        import pickle
-        import os
+    #     import pickle
+    #     import os
 
-        with open(path, 'wb') as writer:
-            pickle.dump(copy_task, writer)
+    #     with open(path, 'wb') as writer:
+    #         pickle.dump(copy_task, writer)
 
-        assert (os.path.getsize(path) > 0)
+    #     assert (os.path.getsize(path) > 0)
 
-        # upload serialized payload
-        ssh.upload_file(client, path, remote_path)
+    #     # upload serialized payload
+    #     ssh.upload_file(client, path, remote_path)
 
-        command = f"cd {workdir} && {executable} -c \"import pickle as p; task = p.load(open('{remote_path}', 'rb')); r=task.run(); p.dump(r,open('{remote_result_path}', 'wb'))\""
-        logger.info("execute command: ", command)
+    #     command = f"cd {workdir} && {executable} -c \"import pickle as p; task = p.load(open('{remote_path}', 'rb')); r=task.run(); p.dump(r,open('{remote_result_path}', 'wb'))\""
+    #     logger.info("execute command: ", command)
 
-        _, stdout, stderr = client.exec_command(command, get_pty=True, environment=os.environ)
+    #     _, stdout, stderr = client.exec_command(command, get_pty=True, environment=os.environ)
 
-        stderr = stderr.readlines()
-        stdout = stdout.readlines()
+    #     stderr = stderr.readlines()
+    #     stdout = stdout.readlines()
 
-        if len(stderr) > 0:
-            raise Exception(f"failed to execute task remotely. stderr: {stderr}. {stdout}")
+    #     if len(stderr) > 0:
+    #         raise Exception(f"failed to execute task remotely. stderr: {stderr}. {stdout}")
 
-        # copy result from remote to local machine
-        logger.debug("copy targts from remote to local")
+    #     # copy result from remote to local machine
+    #     logger.debug("copy targts from remote to local")
 
-        for target in to_list(self.target()):
-            if isinstance(target, LocalTarget):
-                local_path = target.path
-                # local_path = str(target.path.absolute()) + ".remote"
-                logger.info(f"download file {local_path}")
-                ssh.download_file(client, target.path, local_path)
+    #     for target in to_list(self.target()):
+    #         if isinstance(target, LocalTarget):
+    #             local_path = target.path
+    #             # local_path = str(target.path.absolute()) + ".remote"
+    #             logger.info(f"download file {local_path}")
+    #             ssh.download_file(client, target.path, local_path)
 
-        # copy and read result
-        local_result_path = remote_result_path + '.local'
-        ssh.download_file(client, remote_result_path, local_result_path)
+    #     # copy and read result
+    #     local_result_path = remote_result_path + '.local'
+    #     ssh.download_file(client, remote_result_path, local_result_path)
 
-        return pickle.load(open(local_result_path, 'rb'))
+    #     return pickle.load(open(local_result_path, 'rb'))
 
     def _create_simple_local_target(self):
         args = self._get_args()
@@ -323,31 +327,35 @@ class DownloadTask(Task):
 
     def run(self):
         download(self.url, str(self.destination.absolute()), auth=self.auth, headers=self.headers)
+        return self.destination
 
     def target(self) -> LocalTarget:
         return LocalTarget(self.destination)
 
 
 class TempDownloadTask(Task):
-    def __init__(self, url: str, auth: Optional[Tuple[str, str]] = None, headers: Optional[Dict[str, str]] = None, suffix: Optional[str] = None) -> None:
+    def __init__(self, url: str, auth: Optional[Tuple[str, str]] = None, headers: Optional[Dict[str, str]] = None, suffix: Optional[str] = None, delete=True) -> None:
         self.url: str = url
 
         filename = str(get_hash(url))
         if suffix:
             filename += suffix
 
-        self.destination: Path = Path("/tmp/", filename).absolute()
+        self._destination: Path = Path("/tmp/", filename).absolute()
+        if self._destination.exists() and delete:
+            self._destination.unlink()
+
         self.headers = headers
         self.auth = auth
 
     def run(self):
-        logger.debug(f"downloading {self.url} to {self.destination}")
+        logger.debug(f"downloading {self.url} to {self._destination}")
         start = default_timer()
-        download(self.url, str(self.destination.absolute()), auth=self.auth, headers=self.headers)
+        download(self.url, str(self._destination.absolute()), auth=self.auth, headers=self.headers)
         return dict(elapsed=default_timer() - start)
 
     def target(self) -> LocalTarget:
-        return LocalTarget(self.destination)
+        return LocalTarget(self._destination)
 
 
 def get_hash(obj: any) -> str:
