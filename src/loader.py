@@ -2,19 +2,14 @@ import json
 import ast
 from .base import Task
 from .schedule import run
+from .distributed import run_distributed, RedisTaskManager
+from .utils import import_task
 
 from argparse import ArgumentParser
 import argparse
 import schedule
 import time
-
-
-def import_task(name: str):
-    components = name.split('.')
-    mod = __import__(components[0])
-    for comp in components[1:]:
-        mod = getattr(mod, comp)
-    return mod
+from functools import partial
 
 
 weekdays = ['monday', 'tuesday', 'wednesday', 'tursday', 'friday', 'saturday', 'sunday']
@@ -27,6 +22,10 @@ def main():
     p.add_argument('--every', choices=weekdays + units + ["one_time"], default='one_time')
     p.add_argument('--count', type=int, default=None)
     p.add_argument('--to', type=int, default=None)
+    p.add_argument('--distributed', action="store_true")
+    p.add_argument('--redis_host', default='localhost')
+    p.add_argument('--queue_name', default='test')
+    p.add_argument('--redis_port', type=int, default=6379)
     p.add_argument('--at', help='time of the day, if not set, executed at 0:00')
     p.add_argument('args', nargs=argparse.REMAINDER)
     args = p.parse_args()
@@ -53,14 +52,24 @@ def main():
     ) for i in range(0, len(task_args), 2)]
 
     task_args = dict(items)
-
     TaskClass = import_task(task_class)
 
     print(f"restored task {TaskClass}")
     task: Task = TaskClass(**task_args)
 
+    def get_manager():
+        queue = RedisTaskManager(
+            args.redis_host,
+            queue_name=args.queue_name,
+            port=args.redis_port
+        )
+        queue.reset()
+        return queue
+
+    _task_run = partial(run_distributed, manager=get_manager()) if args.distributed else run
+
     if args.every == 'one_time':
-        results = run(task)
+        results = _task_run(task)
         print(f"results: {results}")
     else:
         sched = schedule
@@ -76,7 +85,7 @@ def main():
         if args.at:
             sched = sched.at(args.at)
 
-        sched.do(lambda: run(task))
+        sched.do(lambda: _task_run(task))
         print("jobs: ", schedule.get_jobs())
 
         while True:

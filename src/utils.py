@@ -7,6 +7,14 @@ import multiprocessing
 import requests
 
 
+def import_task(name: str):
+    components = name.split('.')
+    mod = __import__(components[0])
+    for comp in components[1:]:
+        mod = getattr(mod, comp)
+    return mod
+
+
 def get_files(directory, extensions=None) -> List[str]:
     files = []
     extensions = [ext.lower() for ext in extensions] if extensions else None
