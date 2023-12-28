@@ -88,7 +88,7 @@ setuptools.setup(
     install_requires=requirements,
     entry_points={
         'console_scripts': [
-           f"ginny=ginny.loader:main",
+           "ginny=ginny.loader:main",
         ],
     },
     extras_require={
@@ -102,7 +102,7 @@ setuptools.setup(
         'Development Status :: 3 - Alpha',
         'Intended Audience :: Developers',
         'Operating System :: POSIX :: Linux',
-        'License :: OSI Approved :: GNU General Public License v3 (GPLv3)',
+        'License :: OSI Approved :: MIT License',
         'Programming Language :: Python :: 3',
     ],
 )
