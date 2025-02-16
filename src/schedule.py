@@ -5,7 +5,7 @@ from typing import Dict, List
 
 import networkx as nx
 
-from .base import Target, Task, to_list
+from .base import Target, Task, is_task, to_list
 from .utils import logger
 
 
@@ -15,8 +15,7 @@ def _schedule(task: Task, g: nx.Graph, force: bool = False):
         g.add_node(task)
 
         for dep_task in to_list(task.depends()):
-
-            if isinstance(dep_task, Task):
+            if is_task(dep_task):
                 if dep_task.done() and not force:
                     logger.debug(f"skip scheduling {dep_task} because it is already done")
                     continue
@@ -28,7 +27,7 @@ def _schedule(task: Task, g: nx.Graph, force: bool = False):
                 if not dep_task.exists():
                     raise UnresolvedDependencyException(task, unresolved=dep_task)
             else:
-                raise Exception(f"invalid task/target type: {dep_task.__class__.__name__}")
+                raise Exception(f"invalid task/target type: className={dep_task.__class__.__name__} value={dep_task} class={dep_task.__class__}")
 
     return g
 

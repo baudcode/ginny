@@ -204,6 +204,9 @@ class TaskResources:
     cpu: str
     memory: str
 
+def is_task(o: any) -> bool:
+    return hasattr(o, "__call__") and hasattr(o, "target") and hasattr(o, "depends") and hasattr(o, "run") and hasattr(o, "done") and hasattr(o, "runnable")       
+
 @dataclasses.dataclass(frozen=True)
 class Task(Comparable):
 

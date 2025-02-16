@@ -14,6 +14,7 @@ from .base import (
     Uri,
     encode,
     encode_short,
+    is_task,
 )
 from .s3 import S3, S3DownloadTask, S3File, S3Obj, S3Target, S3UploadTask
 from .schedule import (
