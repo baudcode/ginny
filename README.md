@@ -30,10 +30,11 @@ ginny --task ginny.DownloadTask --every 'day' --at "00:00" url "https://static.w
 
 ```python
 from ginny import run, Task
-class MyTask(Task):
+import dataclasses
 
-    def __init__(self, url: str):
-        self.url = url
+@dataclasses.dataclass(frozen=True)
+class MyTask(Task):
+    url: str
 
     def depends(self):
         # return tasks or targets that this task depends on
@@ -41,7 +42,7 @@ class MyTask(Task):
         # return [LocalTarget("/tmp/data.json"), LocalTarget("/tmp/data2.json")]
         return [LocalTarget("/tmp/data.json"), DownloadTask(self.url, "/tmp/data2.json")]
     
-    def run(self):
+    def run(self, *args, **kwargs):
         target, download_task = self.depends()
         data1 = target.read_json()
         data2 = download_task.target().read_json()
@@ -71,13 +72,63 @@ from ginny import BashTask, S3DownloadTask, DownloadTask, S3UploadTask, Task, SS
 r = run(BashTask(['ls', '-lha']))
 ```
 
-### Run task remotely (WIP)
+### Run Dag/Task with Argo Workflows
+
+```
+
+```
+
+
+### Run dynamic tasks
 
 ```python
+# generate some parameters within some task (producer)
+@dataclasses.dataclass(frozen=True)
+class GenerateLines(Task):
+    def run(self, *args, **kwargs):
+        self.target()[2].set([
+            {"key": "testing123", "dummy": "1"},
+            {"key": "testing456", "dummy": "2"},
+            {"key": "testing4567", "dummy": "3"},
+        ])
 
-# execute single task remotely
-results = BashTask(['ls', '-lha']).remote('host', 'ubuntu', pem=None, executable='/home/ubuntu/venv/bin/python')
+    def target(self):
+        return [IterableParameterMap(name='data', keys=['key', 'dummy'])]
+
+# consume one item
+@dataclasses.dataclass(frozen=True)
+class ProcessLine(Task):
+    key: str
+    dummy: str
+
+    def run(self, *args, **kwargs):
+        self.target().write_text(f"processed {self.key} {self.dummy}")
+    
+    def target(self):
+        return LocalTarget(f"/tmp/processed_{self.key}.txt")
+
+# run all in parallel
+@dataclasses.dataclass(frozen=True)
+class ProcessLines(DynamicTask):
+
+    @property
+    def taskclass(self):
+        return ProcessLine
+    
+    @property
+    def parameter(self):
+        return [IterableParameterMap(name='data', keys=['pano_id', 'order_id'])]
+
+    def depends(self):
+        return [GenerateLines()]
 ```
+
+### Connect task to argo events
+
+```bash
+WIP
+```
+
 
 ### Development
 
