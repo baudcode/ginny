@@ -7,3 +7,4 @@ networkx
 schedule
 pydantic
 requests
+pyyaml
