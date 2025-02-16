@@ -1,10 +1,12 @@
-from typing import Dict
-import networkx as nx
-from .base import Task, to_list, Target
-from typing import List
+from datetime import datetime
 from multiprocessing import Pool as ProcessPool
 from multiprocessing.pool import ThreadPool
-from datetime import datetime
+from typing import Dict, List
+
+import networkx as nx
+
+from .base import Target, Task, to_list
+from .utils import logger
 
 
 def _schedule(task: Task, g: nx.Graph, force: bool = False):
@@ -15,6 +17,10 @@ def _schedule(task: Task, g: nx.Graph, force: bool = False):
         for dep_task in to_list(task.depends()):
 
             if isinstance(dep_task, Task):
+                if dep_task.done() and not force:
+                    logger.debug(f"skip scheduling {dep_task} because it is already done")
+                    continue
+
                 g.add_edge(task, dep_task)
                 g = _schedule(dep_task, g, force=force)
 
@@ -76,38 +82,41 @@ def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False,
     order = create_execution_order(task, g)
 
     if debug:
-        print("\n\n========= execution order =========")
+        logger.debug("\n\n========= execution order =========")
         for level, tasks in enumerate(order):
-            print(f"[level={level}] => ", tasks)
-        print("===================================\n\n")
+            logger.debug(f"[level={level}] => {tasks}")
+        logger.debug("===================================\n\n")
 
     start = datetime.now()
-    print(f'start => {start}')
+    logger.info(f'start => {start}')
 
     all_results = {}
 
     with PoolClass(workers) as pool:
-        for tasks in order:
-            print(".")
-            scheduled = []
+
+        for level, tasks in enumerate(order):
+            logger.info(f"[level={level}]")
+            scheduled: List[Task] = []
+
             for task in tasks:
-                print(f"=> Running {task}")
+                logger.debug(f"=> Checking if {task} is runnable")
 
                 if task.runnable():
                     scheduled.append(task)
                 else:
                     raise UnresolvedDependencyException(task)
 
-            results = pool.map(lambda x: x.run(), scheduled)
+            logger.info("=> Running tasks with pool.map: {scheduled}")
+            results = pool.map(lambda x: x.run(pool), scheduled)
 
             # check that all tasks have produced results
             for task in scheduled:
                 for target in to_list(task.target()):
-                    if not target.exists():
+                    if isinstance(target, Target) and not target.exists():
                         raise NoResultException(task, target=target)
 
             for task, result in zip(scheduled, results):
                 all_results[task] = result
 
-    print(f"end => {datetime.now()} | elapsed: {(datetime.now() - start).total_seconds():.2f} seconds")
+    logger.info(f"end => {datetime.now()} | elapsed: {(datetime.now() - start).total_seconds():.2f} seconds")
     return all_results

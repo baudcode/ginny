@@ -1,25 +1,34 @@
-from typing import Callable
-import copy
-import logging
-import io
-from timeit import default_timer
-from abc import ABC
-from . import s3
-from typing import List, Dict, Union, Optional, Tuple, runtime_checkable, Protocol
-from pathlib import Path
-from .utils import download
-from . import ssh
-import subprocess
-import json
-from PIL import Image
-import numpy as np
 import base64
+import copy
+import dataclasses
+import datetime
 import hashlib
-from .docker import Container
+import json
+import logging
 import os
 import shutil
-from .utils import logger
+import subprocess
+from concurrent.futures import ProcessPoolExecutor as ProcessPool
+from concurrent.futures import ThreadPoolExecutor as ThreadPool
+from pathlib import Path
+from timeit import default_timer
+from typing import Callable, Dict, List, Optional, Tuple, Union
 
+from .docker import Container
+from .utils import download, logger
+
+
+# Define the GlobalVar type
+class GlobalVar(str):
+    # def __new__(cls, value, default=None):
+    # return str.__new__(cls, default) if value is not None else None
+    
+    # how can I test that default was set?
+    def __init__(self, value, default=None):
+        self.default = default
+    
+    def __str__(self):
+        return str(self.default)
 
 class Uri:
     def __init__(self, uri: str) -> None:
@@ -46,15 +55,32 @@ def encode_short(url: str):
     e = hashlib.sha1(bytes(url, 'utf-8'))
     return e.hexdigest()
 
+@dataclasses.dataclass(frozen=True)
+class Comparable:
+    # def _get_args(self):
+    #     valid_items = filter(lambda x: not x[0].startswith("_"), self.__dict__.items())
+    #     return ",".join(list(map(lambda x: F"{x[0]}={x[1]}", valid_items)))
 
-@runtime_checkable
-class Comparable(Protocol):
+    @property
+    def id(self):
+        encoded_args = hashlib.blake2b(self._get_args_str().encode(), digest_size=8).hexdigest()
+        return self.__class__.__name__.lower() + "-" + encoded_args
+
     def _get_args(self):
-        valid_items = filter(lambda x: not x[0].startswith("_"), self.__dict__.items())
-        return ",".join(list(map(lambda x: F"{x[0]}={x[1]}", valid_items)))
+        args = {}
+        for k in self.__dataclass_fields__.keys():
+            if k.startswith("_"):
+                continue
+
+            value = getattr(self, k)
+            args[k] = value
+        return args
+    
+    def _get_args_str(self):
+        return  ",".join(list(map(lambda x: F"{x[0]}={x[1]}", self._get_args().items())))
 
     def __repr__(self) -> str:
-        return f"<{self.__class__.__name__} {self._get_args()}>"
+        return f"<{self.__class__.__name__} {self._get_args_str()}>"
 
     def __hash__(self) -> int:
         return hash(self.__repr__())
@@ -62,8 +88,9 @@ class Comparable(Protocol):
     def __eq__(self, __o: "Task") -> bool:
         return hash(__o) == hash(self)
 
-
+@dataclasses.dataclass(frozen=True)
 class Target(Comparable):
+
     def exists(self) -> bool:
         """ checks whether or not the target exists """
         raise NotImplementedError()
@@ -73,32 +100,22 @@ class Target(Comparable):
         raise NotImplementedError()
 
 
-class S3Target(s3.S3File):
-
-    def delete(self):
-        return super().unlink()
-
-    @classmethod
-    def from_uri(cls, uri: str):
-        bucket, path = s3.S3.split_uri(uri)
-        return S3Target(bucket, path)
-
-    def __repr__(self) -> str:
-        return
-
-
+@dataclasses.dataclass(frozen=True)
 class LocalTarget(Target):
-    def __init__(self, path: Union[str, Path], *args):
-        self.path = Path(path, *args).absolute()
+    path: Union[str, Path]
+
+    @property
+    def full_path(self):
+        return Path(self.path).absolute()
 
     def exists(self):
-        return self.path.exists()
+        return self.full_path.exists()
 
     def open(self, mode: str, **args):
-        return self.path.open(mode=mode, **args)
+        return self.full_path.open(mode=mode, **args)
 
     def delete(self):
-        return self.path.unlink(missing_ok=True)
+        return self.full_path.unlink(missing_ok=True)
 
     def read_text(self):
         with self.open("r") as reader:
@@ -116,17 +133,20 @@ class LocalTarget(Target):
             writer.write(json.dumps(data))
 
     def read_image(self, pil: bool = False):
+        import numpy as np
+        from PIL import Image
+
         if pil:
             return Image.open(self.path)
         else:
-            return np.asarray(Image.open(self.path))
+            return np.asarray(Image.open(self.full_path))
 
     def read_json(self):
-        return json.load(self.path.open('r'))
+        return json.load(self.full_path.open('r'))
 
     def md5(self):
         hash_md5 = hashlib.md5()
-        with self.path.open("rb") as f:
+        with self.full_path.open("rb") as f:
             for chunk in iter(lambda: f.read(4096), b""):
                 hash_md5.update(chunk)
 
@@ -140,12 +160,12 @@ class LocalTarget(Target):
             destination_path = Path(destination)
 
         if destination_path.exists() and not exist_ok:
-            raise FileExistsError(f"destination {destination} already exists. [Copy {self.path}]")
+            raise FileExistsError(f"destination {destination} already exists. [Copy {self.full_path}]")
 
-        if not self.path.exists():
-            raise FileExistsError(f"file {self.path} already exists. [Copy to {destination_path}")
+        if not self.full_path.exists():
+            raise FileExistsError(f"file {self.full_path} already exists. [Copy to {destination_path}")
 
-        shutil.copyfile(self.path, destination_path)
+        shutil.copyfile(self.full_path, destination_path)
 
         if isinstance(destination, LocalTarget):
             return destination
@@ -179,12 +199,24 @@ def depedendencies_resolved(deps: Dependency) -> bool:
 
     return all(o.exists() if isinstance(o, Target) else o.done() for o in deps)
 
+@dataclasses.dataclass
+class TaskResources:
+    cpu: str
+    memory: str
 
+@dataclasses.dataclass(frozen=True)
 class Task(Comparable):
+
+    def resources(self) -> TaskResources:
+        return TaskResources(cpu="1", memory="100Mi")
+
     def depends(self) -> Dependency:
         return []
 
-    def run(self):
+    def __call__(self):
+        return self.run()
+
+    def run(self, *args, **kwargs): 
         """ run the task. write to the target """
         raise NotImplementedError(f"task {self.__class__.__name__} does not implement run() method")
 
@@ -193,7 +225,11 @@ class Task(Comparable):
         return None
 
     def done(self):
-        return all(o.exists() for o in to_list(self.target()))
+        target = self.target()
+        if target is None:
+            return False
+        
+        return all(o.exists() if not isinstance(o, Task) else o.done() for o in to_list(target))
 
     def runnable(self) -> bool:
         return depedendencies_resolved(self.depends())
@@ -216,145 +252,150 @@ class Task(Comparable):
                 if isinstance(dep, Task):
                     dep.delete(recursive=recursive)
 
-    def remote(self, ip: str, username: str, workdir: Union[str, Path], pem: Optional[Union[str, Path]] = None, executable: str = "python3"):
-        client = ssh.get_client(ip, username, pem=pem)
+    # def remote(self, ip: str, username: str, workdir: Union[str, Path], pem: Optional[Union[str, Path]] = None, executable: str = "python3"):
+    #     client = ssh.get_client(ip, username, pem=pem)
 
-        copy_task = copy.deepcopy(self)
+    #     copy_task = copy.deepcopy(self)
 
-        # sync dependencies
-        for dep in to_list(copy_task.depends()):
-            if isinstance(dep, Target):
-                # sync local target to remote target
-                targets = [dep]
-            elif isinstance(dep, Task):
-                targets = to_list(dep.target())
-            else:
-                targets = []
+    #     # sync dependencies
+    #     for dep in to_list(copy_task.depends()):
+    #         if isinstance(dep, Target):
+    #             # sync local target to remote target
+    #             targets = [dep]
+    #         elif isinstance(dep, Task):
+    #             targets = to_list(dep.target())
+    #         else:
+    #             targets = []
 
-            for target in targets:
-                if isinstance(target, LocalTarget):
-                    if not target.exists():
-                        raise Exception(f"could not find dependency {target}")
+    #         for target in targets:
+    #             if isinstance(target, LocalTarget):
+    #                 if not target.exists():
+    #                     raise Exception(f"could not find dependency {target}")
 
-                    remote_target = LocalTarget(str(target.path.absolute()) + ".copy")
-                    logger.debug(f"=> syncing target {target} to {remote_target}")
-                    ssh.upload_file(client, target.path, remote_target.path)
-                    target.path = remote_target.path
+    #                 remote_target = LocalTarget(str(target.path.absolute()) + ".copy")
+    #                 logger.debug(f"=> syncing target {target} to {remote_target}")
+    #                 ssh.upload_file(client, target.path, remote_target.path)
+    #                 target.path = remote_target.path
 
-                elif isinstance(target, S3Target):
-                    logger.debug(f"not syncing target {target}")
+    #             elif isinstance(target, S3Target):
+    #                 logger.debug(f"not syncing target {target}")
 
-        # execute command python pickled task remotly
+    #     # execute command python pickled task remotly
 
-        # recreate environment
-        # _, _, stderr = client.exec_command(f"ls {environment}")
-        # environment_exists = len(stderr.readlines()) == 0
+    #     # recreate environment
+    #     # _, _, stderr = client.exec_command(f"ls {environment}")
+    #     # environment_exists = len(stderr.readlines()) == 0
 
-        # if not environment_exists:
-        #     # create environment
-        #     print("environment does not exist")
+    #     # if not environment_exists:
+    #     #     # create environment
+    #     #     print("environment does not exist")
 
-        # serialize object pickle
-        path = f"/tmp/remote_task_{self.__class__.__name__}__{encode_short(self._get_args())}.pkl"
-        remote_path = f"/tmp/task_{self.__class__.__name__}__{encode_short(copy_task._get_args())}.pkl"
-        remote_result_path = remote_path + '.result'
+    #     # serialize object pickle
+    #     path = f"/tmp/remote_task_{self.__class__.__name__}__{encode_short(self._get_args())}.pkl"
+    #     remote_path = f"/tmp/task_{self.__class__.__name__}__{encode_short(copy_task._get_args())}.pkl"
+    #     remote_result_path = remote_path + '.result'
 
-        import pickle
-        import os
+    #     import os
+    #     import pickle
 
-        with open(path, 'wb') as writer:
-            pickle.dump(copy_task, writer)
+    #     with open(path, 'wb') as writer:
+    #         pickle.dump(copy_task, writer)
 
-        assert (os.path.getsize(path) > 0)
+    #     assert (os.path.getsize(path) > 0)
 
-        # upload serialized payload
-        ssh.upload_file(client, path, remote_path)
+    #     # upload serialized payload
+    #     ssh.upload_file(client, path, remote_path)
 
-        command = f"cd {workdir} && {executable} -c \"import pickle as p; task = p.load(open('{remote_path}', 'rb')); r=task.run(); p.dump(r,open('{remote_result_path}', 'wb'))\""
-        logger.info("execute command: ", command)
+    #     command = f"cd {workdir} && {executable} -c \"import pickle as p; task = p.load(open('{remote_path}', 'rb')); r=task.run(); p.dump(r,open('{remote_result_path}', 'wb'))\""
+    #     logger.info("execute command: ", command)
 
-        _, stdout, stderr = client.exec_command(command, get_pty=True, environment=os.environ)
+    #     _, stdout, stderr = client.exec_command(command, get_pty=True, environment=os.environ)
 
-        stderr = stderr.readlines()
-        stdout = stdout.readlines()
+    #     stderr = stderr.readlines()
+    #     stdout = stdout.readlines()
 
-        if len(stderr) > 0:
-            raise Exception(f"failed to execute task remotely. stderr: {stderr}. {stdout}")
+    #     if len(stderr) > 0:
+    #         raise Exception(f"failed to execute task remotely. stderr: {stderr}. {stdout}")
 
-        # copy result from remote to local machine
-        logger.debug("copy targts from remote to local")
+    #     # copy result from remote to local machine
+    #     logger.debug("copy targts from remote to local")
 
-        for target in to_list(self.target()):
-            if isinstance(target, LocalTarget):
-                local_path = target.path
-                # local_path = str(target.path.absolute()) + ".remote"
-                logger.info(f"download file {local_path}")
-                ssh.download_file(client, target.path, local_path)
+    #     for target in to_list(self.target()):
+    #         if isinstance(target, LocalTarget):
+    #             local_path = target.path
+    #             # local_path = str(target.path.absolute()) + ".remote"
+    #             logger.info(f"download file {local_path}")
+    #             ssh.download_file(client, target.path, local_path)
 
-        # copy and read result
-        local_result_path = remote_result_path + '.local'
-        ssh.download_file(client, remote_result_path, local_result_path)
+    #     # copy and read result
+    #     local_result_path = remote_result_path + '.local'
+    #     ssh.download_file(client, remote_result_path, local_result_path)
 
-        return pickle.load(open(local_result_path, 'rb'))
+    #     return pickle.load(open(local_result_path, 'rb'))
 
     def _create_simple_local_target(self):
         args = self._get_args()
         return LocalTarget(f"/tmp/{self.__class__.__name__}_{encode_short(args)}.output")
 
-
+@dataclasses.dataclass(frozen=True)
 class DepTask(Task):
-    def run(self):
+    def run(self, *args, **kwargs): 
         pass
 
     def target(self) -> OutputType:
         return [dep.target() for dep in to_list(self.depends())]
 
-
+@dataclasses.dataclass(frozen=True)
 class DownloadTask(Task):
-    def __init__(self, url: str, destination: Path, auth: Optional[Tuple[str, str]] = None, headers: Optional[Dict[str, str]] = None) -> None:
-        self.url: str = url
-        self.destination: Path = Path(destination)
-        self.headers = headers
-        self.auth = auth
 
-    def run(self):
+    url: str
+    destination: Path
+    auth: Optional[Tuple[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
+
+    def __post_init__(self):
+        self.destination = Path(self.destination)
+
+    def run(self, *args, **kwargs): 
         download(self.url, str(self.destination.absolute()), auth=self.auth, headers=self.headers)
 
     def target(self) -> LocalTarget:
         return LocalTarget(self.destination)
 
-
+@dataclasses.dataclass(frozen=True)
 class TempDownloadTask(Task):
-    def __init__(self, url: str, auth: Optional[Tuple[str, str]] = None, headers: Optional[Dict[str, str]] = None, suffix: Optional[str] = None) -> None:
-        self.url: str = url
 
-        filename = str(get_hash(url))
-        if suffix:
-            filename += suffix
+    url: str
+    auth: Optional[Tuple[str, str]] = None
+    headers: Optional[Dict[str, str]] = None
+    suffix: Optional[str] = None
+    _destination: Path = dataclasses.field(init=False)
 
-        self.destination: Path = Path("/tmp/", filename).absolute()
-        self.headers = headers
-        self.auth = auth
+    def __post_init__(self):
+        filename = str(get_hash(self.url))
+        if self.suffix:
+            filename += self.suffix
 
-    def run(self):
-        logger.debug(f"downloading {self.url} to {self.destination}")
+        self._destination: Path = Path("/tmp/", filename).absolute()
+
+    def run(self, *args, **kwargs):
+        logger.debug(f"downloading {self.url} to {self._destination}")
         start = default_timer()
-        download(self.url, str(self.destination.absolute()), auth=self.auth, headers=self.headers)
+        download(self.url, str(self._destination.absolute()), auth=self.auth, headers=self.headers)
         return dict(elapsed=default_timer() - start)
 
     def target(self) -> LocalTarget:
-        return LocalTarget(self.destination)
+        return LocalTarget(self._destination)
 
 
 def get_hash(obj: any) -> str:
     return encode_short(json.dumps(obj))
 
-
+@dataclasses.dataclass(frozen=True)
 class BashTask(Task):
-    def __init__(self, cmd: List[str]) -> None:
-        self.cmd = cmd
+    cmd: List[str]
 
-    def run(self):
+    def run(self, *args, **kwargs):
         logger.debug(f"[Bash] executing {self.cmd}")
         result = subprocess.Popen(self.cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
 
@@ -375,13 +416,13 @@ class BashTask(Task):
     def target(self):
         return LocalTarget(f"/tmp/task_bash_{get_hash(self.cmd)}.output")
 
-
+@dataclasses.dataclass(frozen=True)
 class SingleOutputTask(Task):
 
     def _run(self) -> Union[str, List[str]]:
         pass
 
-    def run(self):
+    def run(self, *args, **kwargs):
         output = self._run()
 
         with self.target().open("w") as writer:
@@ -396,80 +437,22 @@ class SingleOutputTask(Task):
         args = self._get_args()
         return LocalTarget(f"/tmp/{self.__class__.__name__}_{encode_short(args)}.output")
 
+class ContainerRun():
 
-class SSHCommandTask(Task):
-
-    def __init__(self, ip: str, username: str, cmd: List[str], pem: Union[str, Path] = None) -> None:
-        self.cmd = cmd
-        self.pem = pem
-        self.ip = ip
-        self.username = username
-
-    def run(self):
-
-        logging.info(f"=> executing {self.cmd}")
-
-        client = ssh.get_client(self.ip, self.username, pem=self.pem)
-        stdin, stdout, stderr = client.exec_command(" ".join(self.cmd))
-
-        stderr = stderr.readlines()
-
-        if len(stderr) > 0:
-            raise Exception(f"failed to execute {self.cmd} - stderr: {stderr}")
-
-        out = stdout.readlines()
-
-        with self.target().open('w') as writer:
-            writer.writelines(out)
-
-        return out
-
-    def target(self):
-        return self._create_simple_local_target()
-
-
-class S3UploadTask(Task):
-
-    def __init__(self, local_path: Union[str, Path], target_uri: Union[str, Tuple[str, str]]) -> None:
-        self.local_path = Path(local_path)
-        self.target_uri = target_uri if isinstance(target_uri, str) else f"s3://{target_uri[0]}/{target_uri[1]}"
-
-    def depends(self) -> Dependency:
-        return LocalTarget(self.local_path)
-
-    def run(self):
-        assert (self.target().upload(self.local_path))
-
-    def target(self):
-        return S3Target.from_uri(self.target_uri)
-
-
-class S3DownloadTask(Task):
-
-    def __init__(self, uri: Union[str, Tuple[str, str]], local_path: Union[str, Path]) -> None:
-        self.local_path = Path(local_path)
-        self.uri = uri if isinstance(uri, str) else f"s3://{uri[0]}/{uri[1]}"
-
-    def depends(self):
-        return S3Target.from_uri(self.uri)
-
-    def run(self):
-        self.depends().download(self.local_path)
-
-    def target(self):
-        return LocalTarget(str(self.local_path.absolute()))
-
-
-class DockerContainerTask(SingleOutputTask):
-
-    def __init__(self, name: str, force: bool = False, raise_exit_code_nonzero: bool = True) -> None:
-        self.name = name
-        self._container = Container.from_name(name)
-        self.raise_exit_code_nonzero = raise_exit_code_nonzero
-
-    def run(self):
+    def run(self, *args, **kwargs):
         result = self._container.run(raise_exit_code_nonzero=self.raise_exit_code_nonzero)
         return result.json()
+
+@dataclasses.dataclass(frozen=True)
+class DockerContainerTask(SingleOutputTask, ContainerRun):
+
+    name: str
+    force: bool = False
+    raise_exit_code_nonzero: bool = True
+    _container: Container = dataclasses.field(init=False)
+
+    def __post_init__(self):
+        self._container = Container.from_name(self.name)
 
 
 def _create_tmp_path(uri: str):
@@ -479,16 +462,15 @@ def _create_tmp_path(uri: str):
     ext = ext or ".output"
     return Path(f"/tmp/{encode_short(uri)}{ext}")
 
-
+@dataclasses.dataclass(frozen=True)
 class CopyTask(Task):
-    def __init__(self, source: Union[str, Path], destination: Union[str, Path]) -> None:
-        self.source = source
-        self.destination = destination
+    source: Union[str, Path]
+    destination: Union[str, Path]
 
     def depends(self):
         return LocalTarget(self.source)
 
-    def run(self):
+    def run(self, *args, **kwargs):
         source = self.depends()
         target = self.target()
 
@@ -502,7 +484,7 @@ class CopyTask(Task):
     def target(self):
         return LocalTarget(self.destination)
 
-
+@dataclasses.dataclass(frozen=True)
 class DownloadAnyTask(DepTask):
 
     def __init__(self, uri: str, local_path: Union[str, Path] = None, **download_args):
@@ -513,6 +495,7 @@ class DownloadAnyTask(DepTask):
     def depends(self):
         """ test uri format """
         if self.uri.startswith("s3://"):
+            from src.s3 import S3DownloadTask
             return S3DownloadTask(self.uri, self.local_path, **self.download_args)
         elif self.uri.startswith("http://") or self.uri.startswith("https://"):
             return DownloadTask(self.uri, self.local_path, **self.download_args)
@@ -522,7 +505,7 @@ class DownloadAnyTask(DepTask):
     def target(self):
         return LocalTarget(self.local_path)
 
-
+@dataclasses.dataclass(frozen=True)
 class LambdaTarget(Target):
 
     def __init__(self, lambda_fn: Callable):
@@ -534,39 +517,200 @@ class LambdaTarget(Target):
     def delete(self):
         pass
 
+@dataclasses.dataclass(frozen=True)
+class MultiTask(Task):
+    def __init__(self, tasks: List[Task]) -> None:
+        self.tasks = tasks
+    
+    def depends(self):
+        return self.tasks
 
-class MLDockerTask(DockerContainerTask):
+@dataclasses.dataclass(frozen=True)
+class MLDockerTask(ContainerRun):
 
-    def __init__(self, container_name: str, inputs: List[str], outputs: List[str], force: bool = False):
-        self.inputs = inputs
-        self.force = force
-        self.container_name = container_name
-        self._container = Container.from_name(container_name)
+    container_name: str
+    inputs: List[str]
+    outputs: List[str]
+
+
+    _container: Container = dataclasses.field(init=False, default=None)
+    _input_path: Container = dataclasses.field(init=False, default=None)
+    _output_path: Container = dataclasses.field(init=False, default=None)
+    force: bool = False
+
+    def __post_init__(self):
+        self._container = Container.from_name(self.container_name)
 
         # get input and output path
         logger.info(self._container.mounts)
-        self.input_path = list(filter(lambda m: m.destination == Path('/input'), self._container.mounts))[0].source
-        self.output_path = list(filter(lambda m: m.destination == Path('/output'), self._container.mounts))[0].source
-        self.outputs = outputs
+        self._input_path = list(filter(lambda m: m.destination == Path('/input'), self._container.mounts))[0].source
+        self._output_path = list(filter(lambda m: m.destination == Path('/output'), self._container.mounts))[0].source
 
         # clear mounts
         def clear(dir: str):
             shutil.rmtree(dir, ignore_errors=True)
             os.makedirs(dir, exist_ok=True)
 
-        clear(self.input_path)
-        clear(self.output_path)
+        clear(self._input_path)
+        clear(self._output_path)
 
     def depends(self):
         return [
-            DownloadAnyTask(uri, self.input_path / os.path.basename(uri)) for uri in self.inputs
+            DownloadAnyTask(uri, self._input_path / os.path.basename(uri)) for uri in self.inputs
         ] + [
-            LambdaTarget(lambda: os.path.exists(self.output_path)),
-            LambdaTarget(lambda: os.path.exists(self.input_path)),
+            LambdaTarget(lambda: os.path.exists(self._output_path)),
+            LambdaTarget(lambda: os.path.exists(self._input_path)),
         ]
 
-    def run(self):
+    def run(self, *args, **kwargs):
         return self._container.run(raise_exit_code_nonzero=True)
 
     def target(self):
-        return [LocalTarget(self.output_path / o) for o in self.outputs]
+        return [LocalTarget(self._output_path / o) for o in self.outputs]
+    
+@dataclasses.dataclass(frozen=True)
+class ParameterTarget(Target):
+    """ a wrapper class that can generate a parameter for the next task """
+    task: Task = None
+    parameters: Dict[str, Union[str, int, float]] = dataclasses.field(default_factory=lambda: {})
+
+    def env_key(self):
+        return f"TARGET_PARAMETERS_{self.task.id}"
+
+    def exists(self) -> bool:
+        return os.environ.get(self.env_key) is not None
+    
+    def set(self, key, value):
+        self.parameters[key] = value
+        os.environ[self.env_key] = json.dumps(self.parameters)
+
+    def delete(self):
+        self.parameters.clear()
+        os.environ.pop(self.env_key)
+
+
+@dataclasses.dataclass(frozen=True)
+class IterableParameter(Target):
+    name: str
+    """ a wrapper class that can generates parameters for the next task
+    Use exported parameters from one task to execute N next tasks on all parameters
+
+    Example:
+
+    Some task has to write a file with a list of dates. The next task has to read the file and execute a task for each date. 
+    ```yaml
+        ...
+        out_file = open("generated_dates.json", "w") 
+        json.dump([{"partition": (startDt + timedelta(days=i)).strftime('%Y-%m-%d')} for i in range(delta+1)],out_file)     
+        out_file.close() 
+    outputs:
+    parameters:
+    - name: generated_dates
+    valueFrom:
+        default: '[{"partition": "2023-12-20"}]'
+        path: generated_dates.json
+    globalName: generated_dates
+    ```
+    The next task will be executed for each date in the list. 
+    ```yaml
+    - name: data-processing
+      depends: "date-generator"
+      template: whalesay
+      arguments:
+        parameters:
+        - {name: message, value: "{{item.partition}}"}
+        withParam: "{{tasks.date-generator.outputs.parameters.generated_dates}}"
+    ```
+    """
+
+    @property
+    def local_target(self):
+        return LocalTarget(f"/tmp/iterable_parameter_{self.name}.json") # TODO: change from abs path
+
+    def exists(self) -> bool:
+        return self.local_target.exists()
+    
+    def set(self, values: List[Union[str, int, float]]):
+        data = [{self.name: v} for v in values]
+        self.local_target.write_json(data)
+    
+    def values(self):
+        data = self.local_target.read_json() # returns a list of parameters
+        return [d[self.name] for d in data]
+    
+    def list(self):
+        return self.local_target.read_json()
+    
+    def dict(self):
+        return {self.name: self.values()}
+
+@dataclasses.dataclass(frozen=True)
+class IterableParameterMap(Target):
+    name: str
+    keys: List[str]
+
+    @property
+    def local_target(self):
+        return LocalTarget(f"/tmp/iterable_parameter_map_{self.name}.json") # TODO: change from abs path
+
+    def exists(self) -> bool:
+        return self.local_target.exists()
+
+    def list(self) -> List[dict]:
+        # returns a list of dictionaries (parameters for each task)
+        return self.local_target.read_json()
+    
+    def set(self, data: List[Dict[str, Union[str, int, float]]]):
+        assert all(set(d.keys()) == set(self.keys) for d in data)
+        self.local_target.write_json(data)
+    
+    def dict(self):
+        l = self.list()
+        keys = l[0].keys()
+        return {k: [d[k] for d in l] for k in keys}
+
+
+class DynamicTask(Task):
+
+    @property
+    def taskclass(self) -> Task:
+        raise NotImplementedError(f"need to define taskclass property for {self.__class__.__name__}")
+    
+    @property
+    def parameter(self) -> Union[IterableParameter, List[IterableParameter]]:
+        raise NotImplementedError(f"need to define parameters property for {self.__class__.__name__} with return type IterableParameterTarget")
+
+    def run(self, pool: ThreadPool): 
+        tasks = self._runnable_tasks()
+        results = pool.map(lambda t: t.run(), tasks)
+        print("Got results: ", results)
+    
+    def done(self):
+        iterable_targets = to_list(self.parameter)
+        if not all(t.exists() for t in iterable_targets):
+            return False
+        return super().done()
+
+    def _tasks(self, debug=False):
+        target: List[Union[IterableParameter, IterableParameterMap]] = to_list(self.parameter)
+        
+        data = {}
+        for t in target:
+            data.update(t.dict())
+        
+        print("parameters: ", data)
+
+        params = [{k: v[i] for k, v in data.items()} for i in range(len(data[list(data.keys())[0]]))]
+        tasks: List[Task] = [self.taskclass(**params[i]) for i in range(len(params))]
+        return tasks
+
+    def _runnable_tasks(self, debug=False) -> List[Task]:
+        tasks = self._tasks(debug=debug)
+        if debug: print(f"trying to schedule tasks {tasks}")
+        if debug: print("checking which tasks to run")
+        tasks = [t for t in tasks if t.runnable() and not t.done()]
+        if debug: print(f"running tasks {tasks}")
+        return tasks
+
+    def target(self):
+        return self._tasks()

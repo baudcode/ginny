@@ -1,22 +1,21 @@
 import codecs
-from collections import namedtuple
 import io
-from pathlib import Path
-import tqdm
 import os
+import pickle
+from collections import namedtuple
 from dataclasses import dataclass
-import logging
-from typing import Any, Dict, List, Tuple, Union, Optional
+from pathlib import Path
+from timeit import default_timer
+from typing import Any, Dict, List, Optional, Protocol, Tuple, Union
+
 import boto3
 import botocore
-import io
-from PIL import Image
 import numpy as np
-from typing import Protocol
-import functools
+import tqdm
 import ujson as json
-import pickle
-from timeit import default_timer
+from PIL import Image
+
+from .base import Comparable, Dependency, LocalTarget, Task
 from .utils import logger
 
 get_var = os.getenv
@@ -87,8 +86,7 @@ class S3ReadWrite:
 S3Obj = namedtuple('S3Obj', ['key', 'mtime', 'size', 'ETag'])
 
 
-@dataclass
-class S3File:
+class S3File(Comparable):
     bucket: str
     path: str
 
@@ -752,5 +750,56 @@ class S3(object):
             return None
 
 
-if __name__ == '__main__':
-    _test()
+class S3Target(S3File):
+
+    def delete(self):
+        return super().unlink()
+
+    @classmethod
+    def from_uri(cls, uri: str):
+        bucket, path = S3.split_uri(uri)
+        return S3Target(bucket, path)
+
+    def __repr__(self) -> str:
+        return f"S3Target({self.bucket}, {self.path})"
+
+
+
+
+class S3UploadTask(Task):
+
+    local_path: Union[str, Path]
+    target_uri: Union[str, Tuple[str, str]]
+
+    def __post_init__(self):
+        self.local_path = Path(self.local_path)
+        self.target_uri = self.target_uri if isinstance(self.target_uri, str) else f"s3://{self.target_uri[0]}/{self.target_uri[1]}"
+
+    def depends(self) -> Dependency:
+        return LocalTarget(self.local_path)
+
+    def run(self):
+        assert (self.target().upload(self.local_path))
+
+    def target(self):
+        return S3Target.from_uri(self.target_uri)
+
+
+class S3DownloadTask(Task):
+
+    uri: Union[str, Tuple[str, str]]
+    local_path: Union[str, Path]
+
+    def __post_init__(self):
+        self.local_path = Path(self.local_path)
+        self.uri = self.uri if isinstance(self.uri, str) else f"s3://{self.uri[0]}/{self.uri[1]}"
+
+    def depends(self):
+        return S3Target.from_uri(self.uri)
+
+    def run(self):
+        self.depends().download(self.local_path)
+
+    def target(self):
+        return LocalTarget(str(self.local_path.absolute()))
+

@@ -1,17 +1,18 @@
-import json
+import argparse
 import ast
+import json
+import time
+from argparse import ArgumentParser
+
+import schedule
+
 from .base import Task
 from .schedule import run
-
-from argparse import ArgumentParser
-import argparse
-import schedule
-import time
 
 
 def import_task(name: str):
     components = name.split('.')
-    mod = __import__(components[0])
+    mod = __import__(".".join(components[:-1]))
     for comp in components[1:]:
         mod = getattr(mod, comp)
     return mod
@@ -27,6 +28,8 @@ def main():
     p.add_argument('--every', choices=weekdays + units + ["one_time"], default='one_time')
     p.add_argument('--count', type=int, default=None)
     p.add_argument('--to', type=int, default=None)
+    p.add_argument('--debug', action="store_true")
+    p.add_argument('--force', action="store_true")
     p.add_argument('--at', help='time of the day, if not set, executed at 0:00')
     p.add_argument('args', nargs=argparse.REMAINDER)
     args = p.parse_args()
@@ -60,7 +63,7 @@ def main():
     task: Task = TaskClass(**task_args)
 
     if args.every == 'one_time':
-        results = run(task)
+        results = run(task, debug=args.debug, force=args.force)
         print(f"results: {results}")
     else:
         sched = schedule
@@ -76,7 +79,7 @@ def main():
         if args.at:
             sched = sched.at(args.at)
 
-        sched.do(lambda: run(task))
+        sched.do(lambda: run(task, debug=args.debug, force=args.force))
         print("jobs: ", schedule.get_jobs())
 
         while True:
