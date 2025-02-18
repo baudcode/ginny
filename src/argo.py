@@ -14,9 +14,9 @@ from .schedule import (
 
 
 class Metadata(BaseModel):
+    name: str
     generateName: str
     namespace: str = "argo"
-
 
 class ValueFromPath(BaseModel):
     path: str
@@ -36,6 +36,51 @@ class NameKey(BaseModel):
     name: str
     key: str
 
+
+
+class S3StorageConfig(BaseModel):
+    bucket: str
+    region: str
+    endpoint: str = "s3.amazonaws.com"
+    key: str = "argo-workflows"
+    accessKeySecret: NameKey = NameKey(name="argo-secret", key="ARGO_WORKFLOWS_ACCESS")
+    secretKeySecret: NameKey = NameKey(name="argo-secret", key="ARGO_WORKFLOWS_SECRET")
+
+    @classmethod
+    def from_env(cls):
+        # pass
+        #    key="argo-workflows"
+        #     endpoint="s3.amazonaws.com",
+        #     bucket="ai-datastore",
+        #     region="eu-west-1", # TODO: based on bucket
+        #     accessKeySecret=NameKey(name="argo-secret", key="ARGO_WORKFLOWS_ACCESS"),
+        #     secretKeySecret=NameKey(name="argo-secret", key="ARGO_WORKFLOWS_SECRET")
+        return cls(
+            key=os.getenv("S3_KEY", "argo-workflows"),
+            endpoint=os.getenv("S3_ENDPOINT", "s3.amazonaws.com"),
+            bucket=os.getenv("S3_BUCKET"),
+            region=os.getenv("S3_REGION"),
+            accessKeySecret=NameKey(name=os.getenv("S3_ACCESS_KEY_SECRET_NAME", "argo-secret"), key=os.getenv("S3_ACCESS_KEY_SECRET_KEY", "ARGO_WORKFLOWS_ACCESS")),
+            secretKeySecret=NameKey(name=os.getenv("S3_SECRET_KEY_SECRET_NAME", "argo-secret"), key=os.getenv("S3_SECRET_KEY_SECRET_KEY", "ARGO_WORKFLOWS_SECRET")),
+        )
+    @classmethod
+    def from_yaml(cls, path: Union[str, Path]):
+        data = yaml.load(open(path, "r"), Loader=yaml.FullLoader)
+        return cls(**data)
+
+class ArgoConfig(BaseModel):
+    storage: S3StorageConfig
+    namespace: str = "argo"
+    serviceAccountName: str = "argo-workflow"
+
+    @classmethod
+    def from_yaml(cls, path: Union[str, Path]):
+        data = yaml.load(open(path, "r"), Loader=yaml.FullLoader)
+        return cls(
+            storage=S3StorageConfig(**data["storage"]), 
+            namespace=data["namespace"]
+        )
+
 class S3Artifact(BaseModel):
     """
     s3:
@@ -52,9 +97,21 @@ class S3Artifact(BaseModel):
     endpoint: Optional[str] = None
     bucket: str
     key: str
+    region: str
 
     accessKeySecret: Optional[NameKey] = None
     secretKeySecret: Optional[NameKey] = None
+
+    @classmethod
+    def from_config(cls, config: S3StorageConfig, key: str):
+        return cls(
+            endpoint=config.endpoint,
+            bucket=config.bucket,
+            key=key,
+            region=config.region,
+            accessKeySecret=config.accessKeySecret,
+            secretKeySecret=config.secretKeySecret,
+        )
 
 class Artifact(BaseModel):
     name: str
@@ -331,7 +388,7 @@ def to_relative(path: Union[str, Path]) -> str:
         return path[1:]
     return path
 
-def target_to_artifact(workflow_name: str, task_name: str, target: Union[LocalTarget, S3Target]) -> Artifact:
+def target_to_artifact(workflow_name: str, task_name: str, target: Union[LocalTarget, S3Target], config: S3StorageConfig) -> Artifact:
     if isinstance(target, LocalTarget):
         """
         s3:
@@ -346,13 +403,9 @@ def target_to_artifact(workflow_name: str, task_name: str, target: Union[LocalTa
             key: ARGO_WORKFLOWS_SECRET
           key: argo-workflows/test_b/b.txt
         """
-        s3 = S3Artifact(
-            endpoint="s3.amazonaws.com",
-            bucket="ai-datastore",
-            key=os.path.join(f"argo-workflows/{workflow_name}/{task_name}", to_relative(target.path)),
-            region="eu-west-1", # TODO: based on bucket
-            accessKeySecret=NameKey(name="argo-secret", key="ARGO_WORKFLOWS_ACCESS"),
-            secretKeySecret=NameKey(name="argo-secret", key="ARGO_WORKFLOWS_SECRET")
+        s3 = S3Artifact.from_config(
+            config,
+            key=os.path.join(f"{config.key}/{workflow_name}/{task_name}", to_relative(target.path)),
         )
         return Artifact(name=target.id, path=target.path, s3=s3)
     
@@ -413,7 +466,7 @@ dag:
 def is_target(t: Task) -> bool:
     return isinstance(t, (LocalTarget, S3Target))
 
-def task_to_template(workflow_name: str, t: Task, base_image: str = "python:3.9") -> Template:
+def task_to_template(workflow_name: str, t: Task, storage_config: S3StorageConfig, base_image: str = "python:3.9") -> Template:
     task_name = get_task_name(t)
     # args = " ".join([f"{k} {v}" for k, v in t._get_args().items()])
     # args from parameters of task
@@ -426,9 +479,9 @@ def task_to_template(workflow_name: str, t: Task, base_image: str = "python:3.9"
 
     # global and local parameters for templates (values get supplied by DAG task)
     input_parameters = [Parameter(name=k, value=None) for k, v in t._get_args().items()]
-    outputs = [target_to_artifact(workflow_name, t.id, t) for t in to_list(t.target()) if is_target(t)]
+    outputs = [target_to_artifact(workflow_name, t.id, t, storage_config) for t in to_list(t.target()) if is_target(t)]
     
-    input_artifacts = [target_to_artifact(workflow_name, t.id, t) for t in to_list(t.depends()) if is_target(t)]
+    input_artifacts = [target_to_artifact(workflow_name, t.id, t, storage_config) for t in to_list(t.depends()) if is_target(t)]
     # add input artifacts from related tasks
     for dep in to_list(t.depends()):
         if not is_target(dep) and isinstance(dep, Task):
@@ -439,7 +492,7 @@ def task_to_template(workflow_name: str, t: Task, base_image: str = "python:3.9"
                 # if previous artifact was s3 artifact we need to reference it as an input artifact
                 input_artifacts.append(Artifact(name=target.id, path=target.path))
         else:
-            input_artifacts.append(target_to_artifact(workflow_name, t.id, dep))
+            input_artifacts.append(target_to_artifact(workflow_name, t.id, dep, storage_config))
 
     print("....", task_name, "->", "outputs: ", outputs)
     print("input artifacts: ", input_artifacts)
@@ -508,7 +561,7 @@ def task_to_global_vars(t: Task) -> set[tuple[str, str]]:
             global_vars.add((k, v.default))
     return global_vars
 
-def schedule_to_workflow(task: Task, workflow_name: str, base_image: str = "python:3.9") -> Workflow:
+def schedule_to_workflow(task: Task, workflow_name: str, config: ArgoConfig, base_image: str = "python:3.9", entrypoint: str = "dag") -> Workflow:
     tasks = []
     g = schedule(task, force=True)
     order = create_execution_order(task, g)
@@ -525,7 +578,7 @@ def schedule_to_workflow(task: Task, workflow_name: str, base_image: str = "pyth
             # when running the task we should just reference the module, input args and the task id
             # a problem: when we have input args from previous results -> this should not happen, as we have strictly defined dependencies with in -and outputs
 
-            templates.append(task_to_template(workflow_name, t, base_image=base_image))
+            templates.append(task_to_template(workflow_name, t, config.storage, base_image=base_image))
             dag_task = task_to_dag_task(workflow_name, t)
             global_vars.update(task_to_global_vars(t))
 
@@ -534,12 +587,12 @@ def schedule_to_workflow(task: Task, workflow_name: str, base_image: str = "pyth
             )
 
     dag = Dag(tasks=tasks)
-    template_dag = Template(name="dag", dag=dag)
+    template_dag = Template(name=entrypoint, dag=dag)
     templates.append(template_dag)
 
     arguments = Arguments(parameters=[Parameter(name=k, value=v, valueFrom=ValueFromSupplied(supplied={})) for k, v in global_vars])
-    spec = Spec(entrypoint="dag", templates=templates, arguments=arguments) # start the dag and not all other templates
-    metadata = Metadata(name=workflow_name, generateName=f"{workflow_name}-")
+    spec = Spec(entrypoint=entrypoint, templates=templates, arguments=arguments) # start the dag and not all other templates
+    metadata = Metadata(name=workflow_name, generateName=f"{workflow_name}-", namespace=config.namespace)
     workflow = Workflow(metadata=metadata, spec=spec)
 
     return workflow

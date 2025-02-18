@@ -1,0 +1,16 @@
+namespace: "argo" # default
+serviceAccountName: "argo-workflows" # default
+
+storage:
+  key: "argo-workflows" # default
+  bucket: "ai-datastore" # required
+  region: "eu-west-1" # required
+  endpoint: "s3.amazonaws.com" # default
+
+  accessKeySecret: # default
+    name: "argo-secret"
+    key: "ARGO_WORKFLOWS_ACCESS"
+
+  secretKeySecret: # default
+    name: "argo-secret"
+    key: "ARGO_WORKFLOWS_SECRET2"

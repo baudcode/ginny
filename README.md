@@ -1,7 +1,7 @@
 # Ginny
 
 A simple, convenient task manager that is similar to luigi framework but less blown up.
-It allows easy exceution and scheduling of tasks locally and remotelty. 
+It allows easy exceution and scheduling of tasks locally and remotelty using argo workflows. 
 
 ### Run locally
 
@@ -72,12 +72,92 @@ from ginny import BashTask, S3DownloadTask, DownloadTask, S3UploadTask, Task, SS
 r = run(BashTask(['ls', '-lha']))
 ```
 
-### Run Dag/Task with Argo Workflows
+### Run Dag/Task with Argo Workflows (local targets will automatically become s3 targets)
 
+Define argo config with storage via yaml (preferred) and save as `storage.yaml` or use `.from_env()` to load from environment vars
+
+```yaml (argo_config.yaml)
+namespace: "argo" # default
+serviceAccountName: "argo-workflows" # default
+
+storage:
+    key: "argo-workflows" # default
+    bucket: "ai-datastore" # required
+    region: "us-east-1" # required
+    endpoint: "s3.amazonaws.com" # default
+
+    accessKeySecret: # default
+        name: "argo-secret"
+        key: "ARGO_WORKFLOWS_ACCESS"
+
+    secretKeySecret: # default
+        name: "argo-secret"
+        key: "ARGO_WORKFLOWS_SECRET2"
+```
+Define tasks:
+
+```python
+import dataclasses
+from typing import List
+
+from src import GlobalVar, LocalTarget, Task, S3StorageConfig
+
+@dataclasses.dataclass(frozen=True)
+class A(Task):
+    pano_id: str
+    order_id: str = GlobalVar("order_id")
+
+    def run(self, *args, **kwargs):
+        self.target().write_text("hello")
+
+    def target(self):
+        return LocalTarget("/tmp/a.txt")
+
+@dataclasses.dataclass(frozen=True)
+class B(Task):
+    def run(self, *args, **kwargs):
+        self.target().write_text("hello")
+
+    def target(self):
+        return LocalTarget("/tmp/b.txt")
+
+# define the workflow (allows to define global variables which are necessary to make the workflow run)
+@dataclasses.dataclass(frozen=True)
+class Pipeline(Task):
+    order_id: str = GlobalVar("order_id")
+
+    def depends(self) -> List[Task]:
+        a = A(order_id=self.order_id, pano_id="testing123")
+        b = B()
+        return [a, b]
+
+    def run(self, *args, **kwargs):
+        print("Running pipeline")
+        data1 = self.depends()[0].target().read_text()
+        print("Task A exists: ", self.depends()[0].target().exists())
+        print("Task A result: ", data1)
+        data2 = self.depends()[1].target().read_text()
+        print("Task B exists: ", self.depends()[1].target().exists())
+        print("Task B result: ", data2)
+        print("Total result: ")
+
+        print(data1 + data2)
 ```
 
-```
+Create the workflow yaml from the task
+```python
+### export the task graph as a workflow
+task = Pipeline()
+config = ArgoConfig.from_yaml("argo_config.yaml")
 
+# use the base image here where your workflow will be defined and that has the requirements (ginny) installed
+workflow = schedule_to_workflow(task, "a-b-process-test", config, base_image="baudcode/ginny_test:latest") 
+workflow.save("test_workflow.yaml")
+```
+Push test_workflow.yaml to argo workflows
+```bash
+argo submit -n argo --watch test-workflow.yaml
+```
 
 ### Run dynamic tasks
 
@@ -140,7 +220,6 @@ pip install .
 
 ### TODO
 
-- run complete pipelines remotely
-- add gpu support for running remotely
-- limit resoures to run tasks
+- implement argo events and argo sensors to connect tasks to them and make it possible to simulate events comming from them
 - use logging
+- make dynamic tasks work with argo workflows

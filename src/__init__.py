@@ -1,4 +1,4 @@
-from .argo import GlobalVar, schedule_to_workflow
+from .argo import ArgoConfig, GlobalVar, S3StorageConfig, schedule_to_workflow
 from .base import (
     BashTask,
     DepTask,
