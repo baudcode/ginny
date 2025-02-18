@@ -67,7 +67,6 @@ class Pipeline(Task):
     order_id: str = GlobalVar("order_id")
 
     def depends(self) -> List[Task]:
-
         a = A(order_id=self.order_id, pano_id="testing123")
         b = B()
         # print_lines = ProcessLines()
@@ -83,7 +82,6 @@ class Pipeline(Task):
         print("Task B result: ", data2)
         print("Total result: ")
 
-        result_tasks = self.depends()[2].target()
-        print([t.target().read_text() for t in result_tasks])
-
+        # result_tasks = self.depends()[2].target()
+        # print([t.target().read_text() for t in result_tasks])
         print(data1 + data2)
