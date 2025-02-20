@@ -1,6 +1,10 @@
 namespace: "argo" # default
 serviceAccountName: "argo-workflows" # default
-
+resources:
+  limits:
+    cpu: '1'
+    memory: 100Mi
+  requests: {}
 storage:
   key: "argo-workflows" # default
   bucket: "ai-datastore" # required
@@ -13,4 +17,4 @@ storage:
 
   secretKeySecret: # default
     name: "argo-secret"
-    key: "ARGO_WORKFLOWS_SECRET2"
+    key: "ARGO_WORKFLOWS_SECRET"
