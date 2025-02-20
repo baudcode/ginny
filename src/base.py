@@ -3,11 +3,13 @@ import copy
 import dataclasses
 import datetime
 import hashlib
+import itertools
 import json
 import logging
 import os
 import shutil
 import subprocess
+from collections import defaultdict
 from concurrent.futures import ProcessPoolExecutor as ProcessPool
 from concurrent.futures import ThreadPoolExecutor as ThreadPool
 from pathlib import Path
@@ -55,6 +57,20 @@ def encode_short(url: str):
     e = hashlib.sha1(bytes(url, 'utf-8'))
     return e.hexdigest()
 
+def _get_args(c: object):
+    args = {}
+    for k in c.__dataclass_fields__.keys():
+        if k.startswith("_"):
+            continue
+        
+        try:
+            value = getattr(c, k)
+        except AttributeError as e:
+            value = None
+
+        args[k] = value
+    return args
+
 @dataclasses.dataclass(frozen=True)
 class Comparable:
     # def _get_args(self):
@@ -67,14 +83,7 @@ class Comparable:
         return self.__class__.__name__.lower() + "-" + encoded_args
 
     def _get_args(self):
-        args = {}
-        for k in self.__dataclass_fields__.keys():
-            if k.startswith("_"):
-                continue
-
-            value = getattr(self, k)
-            args[k] = value
-        return args
+        return _get_args(self)
     
     def _get_args_str(self):
         return  ",".join(list(map(lambda x: F"{x[0]}={x[1]}", self._get_args().items())))
@@ -201,6 +210,7 @@ def depedendencies_resolved(deps: Dependency) -> bool:
 
 @dataclasses.dataclass
 class TaskResources:
+    """ resources required for a task (used by argo workflow) """
     cpu: str
     memory: str
 
@@ -210,8 +220,8 @@ def is_task(o: any) -> bool:
 @dataclasses.dataclass(frozen=True)
 class Task(Comparable):
 
-    def resources(self) -> TaskResources:
-        return TaskResources(cpu="1", memory="100Mi")
+    def resources(self) -> Optional[TaskResources]:
+        return None
 
     def depends(self) -> Dependency:
         return []
@@ -342,6 +352,7 @@ class Task(Comparable):
 
 @dataclasses.dataclass(frozen=True)
 class DepTask(Task):
+    """ a task that depends on other tasks """
     def run(self, *args, **kwargs): 
         pass
 
@@ -350,6 +361,7 @@ class DepTask(Task):
 
 @dataclasses.dataclass(frozen=True)
 class DownloadTask(Task):
+    """ a task that downloads a file from a url """
 
     url: str
     destination: Path
@@ -607,12 +619,12 @@ class IterableParameter(Target):
         json.dump([{"partition": (startDt + timedelta(days=i)).strftime('%Y-%m-%d')} for i in range(delta+1)],out_file)     
         out_file.close() 
     outputs:
-    parameters:
-    - name: generated_dates
-    valueFrom:
-        default: '[{"partition": "2023-12-20"}]'
-        path: generated_dates.json
-    globalName: generated_dates
+        parameters:
+        - name: generated_dates
+          valueFrom:
+            # default: '[{"partition": "2023-12-20"}]'
+            path: generated_dates.json
+          globalName: generated_dates
     ```
     The next task will be executed for each date in the list. 
     ```yaml
@@ -622,7 +634,7 @@ class IterableParameter(Target):
       arguments:
         parameters:
         - {name: message, value: "{{item.partition}}"}
-        withParam: "{{tasks.date-generator.outputs.parameters.generated_dates}}"
+      withParam: "{{tasks.date-generator.outputs.parameters.generated_dates}}"
     ```
     """
 
@@ -674,28 +686,48 @@ class IterableParameterMap(Target):
 
 
 class DynamicTask(Task):
+    _is_dyanmic = True
 
     @property
-    def taskclass(self) -> Task:
+    def taskclass(self):
         raise NotImplementedError(f"need to define taskclass property for {self.__class__.__name__}")
     
     @property
-    def parameter(self) -> Union[IterableParameter, List[IterableParameter]]:
-        raise NotImplementedError(f"need to define parameters property for {self.__class__.__name__} with return type IterableParameterTarget")
+    def parameter(self) -> Dict[Task, List[IterableParameter]]:
+        depends = to_list(self.depends())
+
+        # returns all iterable parameter maps it can find
+        parameters = defaultdict(lambda: [])
+
+        for d in filter(is_task, depends):
+            d: Task
+            for t in to_list(d.target()):
+                if isinstance(t, IterableParameterMap):
+                    parameters[d].append(t)
+
+        if len(parameters) == 0:
+            raise Exception(f"task {self.__class__.__name__} must have a dependent task which returns an IterableParameterMap")
+        
+        return parameters
+    
+    @property
+    def _parameter_list(self):
+        return [k for t in self.parameter.values() for k in t]
 
     def run(self, pool: ThreadPool): 
         tasks = self._runnable_tasks()
         results = pool.map(lambda t: t.run(), tasks)
         print("Got results: ", results)
+        return results
     
     def done(self):
-        iterable_targets = to_list(self.parameter)
+        iterable_targets = to_list(self._parameter_list)
         if not all(t.exists() for t in iterable_targets):
             return False
         return super().done()
 
     def _tasks(self, debug=False):
-        target: List[Union[IterableParameter, IterableParameterMap]] = to_list(self.parameter)
+        target: List[Union[IterableParameter, IterableParameterMap]] = to_list(self._parameter_list)
         
         data = {}
         for t in target:
