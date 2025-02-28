@@ -53,11 +53,12 @@ Loggable = Union["pd.DataFrame", np.ndarray, Image.Image, Markdown, Path, dateti
 class LogContext:
     task: "Task"
     ts: datetime.datetime = dataclasses.field(default_factory=datetime.datetime.now)
+    from_file: Optional[Path] = None
 
 class Log:
     """ a singleton class for logging custom objects like pandas dataframes, numpy arrays, images to html file """
     _instance = None
-    _log: List[Tuple[Loggable, Optional[LogContext]]]
+    _loglist: List[Tuple[Loggable, Optional[LogContext]]]
     _lock = Lock()
 
     def __new__(cls, *args, **kwargs):
@@ -65,35 +66,43 @@ class Log:
             if not cls._instance:
                 manager = Manager()
                 cls._instance = super(Log, cls).__new__(cls)
-                cls._instance._log = manager.list()
+                cls._instance._loglist = manager.list()
         return cls._instance
 
+    def _log(self, obj: Loggable, context: Optional[LogContext] = None):
+        with self._lock:
+            self._loglist.append((obj, context))
+
     def log(self, obj: Loggable, task: Optional["Task"] = None):
-        context = LogContext(task=task)
 
         if isinstance(obj, Path):
             self.add_file(obj, task=task)
         else:
-            self._log.append((obj, context))
+            context = LogContext(task=task)
+            self._log(obj, context=context)
     
     def add_file(self, path: Union[str, Path], task: Optional["Task"] = None):
         # depending on the file extension, we can load the file as a pandas dataframe or an image, markdown, etc.
         ext = Path(path).suffix.lower()
-        context = LogContext(task=task)
+        context = LogContext(task=task, from_file=Path(path))
+
+        print("context for logging to file: ", context)
 
         if ext in [".csv", ".xlsx"]:
-            self.log(pd.read_csv(path), context=context)
+            self._log(pd.read_csv(path), context=context)
         if ext in ['parquet']:
-            self.log(pd.read_parquet(path), context=context)
+            self._log(pd.read_parquet(path), context=context)
         elif ext in [".jpg", ".jpeg", ".png"]:
-            self.log(Image.open(path), context=context)
+            self._log(Image.open(path), context=context)
         elif ext in [".md"]:
             with open(path, "r") as f:
-                self.log(Markdown(f.read()), context=context)
+                self._log(Markdown(f.read()), context=context)
         elif ext in [".npy", "np"]:
-            self.log(np.load(path), context=context)
+            self._log(np.load(path), context=context)
         else:
-            logger.warning(f"file extension {ext} is not supported in {context=}")
+            logger.warning(f"file extension {ext} unknwon for {path}. reverting to plain text")
+            with open(path, "r") as f:
+                self._log(f.read(), context=context)
 
     def save(self, filename):
         html_elements = []
@@ -104,7 +113,7 @@ class Log:
         groups = {}
         group_order = []
 
-        for (obj, context) in self._log:
+        for (obj, context) in self._loglist:
             if context.task not in groups:
                 groups[context.task] = []
 
@@ -133,10 +142,14 @@ class Log:
                     else:
                         elem = str(obj)
 
+                    underline = context.ts.isoformat()
+                    if context.from_file:
+                        underline += f" from file {context.from_file}"
+
                     elem_div_with_ts = f"""
                     <div>
                     {elem}
-                    <p style="margin-top: 10px; font-style: italic">{context.ts.isoformat()}</p>
+                    <p style="margin-top: 10px; font-style: italic">{underline}</p>
                     </div>
                     """
                     html_elements.append(elem_div_with_ts)

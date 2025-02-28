@@ -1,4 +1,6 @@
+import tempfile
 from datetime import date, datetime
+from pathlib import Path
 
 import numpy as np
 import pandas as pd
@@ -27,4 +29,11 @@ def test_with_multiple_tasks_as_context():
     log.log(Markdown("# Hello World"), task=4)
     log.log(date.today(), task=5)
     log.log(datetime.now(), task=6)
+    # write to a temporary file and log it
+
+    with tempfile.NamedTemporaryFile("w") as f:
+        f.write("Hello World")
+        f.seek(0)
+        log.log(Path(f.name), task=7)
+
     log.save("test.html")
