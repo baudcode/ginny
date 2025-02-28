@@ -161,6 +161,8 @@ argo submit -n argo --watch test-workflow.yaml
 
 ### Run dynamic tasks
 
+Limit: Dynamic tasks are not allowed to have another dynamic task dependecy. 
+
 ```python
 # generate some parameters within some task (producer)
 @dataclasses.dataclass(frozen=True)
