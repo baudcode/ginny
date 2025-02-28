@@ -113,6 +113,14 @@ class Target(Comparable):
 class LocalTarget(Target):
     path: Union[str, Path]
 
+    def __post_init__(self):
+        path = Path(self.path)
+        if path.is_dir():
+            raise ValueError(f"target {path} must bot be a directory")
+        
+        path.parent.mkdir(parents=True, exist_ok=True)
+
+
     @property
     def full_path(self):
         return Path(self.path).absolute()
@@ -185,20 +193,30 @@ class LocalTarget(Target):
 OutputType = Union[Target, List[Target], Dict[str, Target]]
 Dependency = Union[Target, List[Target], "Task", List["Task"], Dict[str, Target], Dict[str, "Task"]]
 
+def flatten(li: list):
+    """ reduces a multi-dimensional list to a single dimension """
+    for elem in li:
+        if isinstance(elem, list):
+            yield from flatten(elem)
+        else:
+            yield elem
+
+
 
 def to_list(o: Optional[OutputType]):
     if o is None:
         return []
 
     elif isinstance(o, dict):
-        return list(o.values())
+        li = list(o.values())
     elif isinstance(o, list):
-        return o
+        li = o
     elif isinstance(o, tuple):
-        return list(o)
+        li = list(o)
     else:
-        return [o]
+        li = [o]
 
+    return list(flatten(li))
 
 def depedendencies_resolved(deps: Dependency) -> bool:
     deps = to_list(deps)
@@ -242,6 +260,7 @@ class Task(Comparable):
         if target is None:
             return False
         
+        print("target: ", target)
         return all(o.exists() if not isinstance(o, Task) else o.done() for o in to_list(target))
 
     def runnable(self) -> bool:
@@ -676,6 +695,7 @@ class IterableParameterMap(Target):
         return self.local_target.read_json()
     
     def set(self, data: List[Dict[str, Union[str, int, float]]]):
+        print(f"setting {data} to {self.name} with keys {self.keys}")
         assert all(set(d.keys()) == set(self.keys) for d in data)
         self.local_target.write_json(data)
     
@@ -689,20 +709,29 @@ class DynamicTask(Task):
     _is_dyanmic = True
 
     @property
+    def parameter_map(self) -> Optional[str]:
+        """ need to define parameter_map property if you want to use it, otherwise first parameter map of depending task will be used """
+        return None
+
+    @property
     def taskclass(self):
         raise NotImplementedError(f"need to define taskclass property for {self.__class__.__name__}")
     
     @property
     def parameter(self) -> Dict[Task, List[IterableParameter]]:
+        # we must depend on tasks which have parameter maps as targets
         depends = to_list(self.depends())
 
-        # returns all iterable parameter maps it can find
+        # returns all iterable parameter maps it can find in the dependend tasks
         parameters = defaultdict(lambda: [])
 
         for d in filter(is_task, depends):
             d: Task
             for t in to_list(d.target()):
                 if isinstance(t, IterableParameterMap):
+                    if self.parameter_map is not None and t.name != self.parameter_map:
+                        continue
+
                     parameters[d].append(t)
 
         if len(parameters) == 0:
@@ -714,12 +743,14 @@ class DynamicTask(Task):
     def _parameter_list(self):
         return [k for t in self.parameter.values() for k in t]
 
-    def run(self, pool: ThreadPool): 
+    def run(self, pool: ThreadPool, *args, **kwargs): 
         tasks = self._runnable_tasks()
-        results = pool.map(lambda t: t.run(), tasks)
-        print("Got results: ", results)
-        return results
-    
+
+        # create a local execution order
+        from . import run
+        print("running tasks", tasks)
+        return [run(t, pool=pool.__class__) for t in tasks]
+
     def done(self):
         iterable_targets = to_list(self._parameter_list)
         if not all(t.exists() for t in iterable_targets):
@@ -733,11 +764,15 @@ class DynamicTask(Task):
         for t in target:
             data.update(t.dict())
         
-        print("parameters: ", data)
-
         params = [{k: v[i] for k, v in data.items()} for i in range(len(data[list(data.keys())[0]]))]
+        print("params: ", params)
+        # print("data: ", data)
         tasks: List[Task] = [self.taskclass(**params[i]) for i in range(len(params))]
+        # print("tasks: ", tasks)
         return tasks
+    
+    def generate(self):
+        return self._tasks()
 
     def _runnable_tasks(self, debug=False) -> List[Task]:
         tasks = self._tasks(debug=debug)
