@@ -1,19 +1,22 @@
 from pathlib import Path
 from timeit import default_timer
+
 from .utils import logger  # noqa
 
 try:
     import docker
-except:
-    logger.warning("docker tasks cannot be used. 'docker' package is missing. Use <pip install docker>")
+except ImportError:
+    # logger.warning("docker tasks cannot be used. 'docker' package is missing. Use <pip install docker>")
+    pass
+
 
 import enum
-from pydantic import BaseModel
-from typing import Optional
-from datetime import datetime
-from typing import Dict, List
-import shutil
 import os
+import shutil
+from datetime import datetime
+from typing import Dict, List, Optional
+
+from pydantic import BaseModel, Field
 
 
 class ContainerStatus(str, enum.Enum):
@@ -32,35 +35,18 @@ class Image(BaseModel):
 
 
 class ContainerState(BaseModel):
-    status: ContainerStatus
-    exit_code: Optional[int]
-    error: Optional[str]
-    oom_killed: Optional[bool]
-    pid: Optional[str]
-
-    class Config:
-        fields = {
-            "exit_code": "ExitCode",
-            "error": "Error",
-            "status": "Status",
-            "oom_killed": "OOMKilled",
-            "pid": "Pid"
-        }
+    status: ContainerStatus = Field(alias="Status")
+    exit_code: Optional[int] = Field(alias="ExitCode", default=None)
+    error: Optional[str] = Field(alias="Error", default=None)
+    oom_killed: Optional[bool] = Field(alias="OOMKilled", default=None)
+    pid: Optional[str] = Field(alias="Pid", default=None)
 
 
 class Mount(BaseModel):
-    source: Path
-    destination: Path
-    mode: str
-    rw: bool
-
-    class Config:
-        fields = {
-            "source": "Source",
-            "destination": "Destination",
-            "mode": "Mode",
-            "rw": "RW"
-        }
+    source: Path = Field(alias="Source")
+    destination: Path = Field(alias="Destination")
+    mode: str = Field(alias="Mode")
+    rw: bool = Field(alias="RW")
 
 
 class LastRun(BaseModel):
