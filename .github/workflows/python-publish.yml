@@ -70,4 +70,3 @@ jobs:
         with:
           packages-dir: dist/
           user: baudcode
-          password: ${{ secrets.PYPI_PASSWORD }}
