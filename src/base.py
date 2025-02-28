@@ -260,7 +260,6 @@ class Task(Comparable):
         if target is None:
             return False
         
-        print("target: ", target)
         return all(o.exists() if not isinstance(o, Task) else o.done() for o in to_list(target))
 
     def runnable(self) -> bool:
