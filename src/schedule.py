@@ -105,7 +105,7 @@ def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False,
                 else:
                     raise UnresolvedDependencyException(task)
 
-            logger.info("=> Running tasks with pool.map: {scheduled}")
+            logger.info(f"=> Running tasks with pool.map: {scheduled}")
             results = pool.map(lambda x: x.run(pool), scheduled)
 
             # check that all tasks have produced results
