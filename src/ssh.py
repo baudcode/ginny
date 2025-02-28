@@ -10,7 +10,9 @@ try:
     import paramiko
     from paramiko.client import AutoAddPolicy, SSHClient
 except:
-    logger.warning("SSH Tasks cannot be used because 'paramiko' is not installed. <pip install paramiko>")
+    pass
+
+    # logger.warning("SSH Tasks cannot be used because 'paramiko' is not installed. <pip install paramiko>")
 
 
 def get_client(ip: str, username: str, pem: Optional[Union[str, Path]] = None):
@@ -67,7 +69,7 @@ class SSHCommandTask(Task):
 
         logging.info(f"=> executing {self.cmd}")
 
-        client = ssh.get_client(self.ip, self.username, pem=self.pem)
+        client = get_client(self.ip, self.username, pem=self.pem)
         stdin, stdout, stderr = client.exec_command(" ".join(self.cmd))
 
         stderr = stderr.readlines()
