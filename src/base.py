@@ -1,11 +1,7 @@
 import base64
-import copy
 import dataclasses
-import datetime
 import hashlib
-import itertools
 import json
-import logging
 import os
 import shutil
 import subprocess
@@ -17,6 +13,7 @@ from timeit import default_timer
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
 from .docker import Container
+from .log import Log, Loggable
 from .utils import download, logger
 
 
@@ -238,11 +235,20 @@ def is_task(o: any) -> bool:
 @dataclasses.dataclass(frozen=True)
 class Task(Comparable):
 
+    @property
+    def _disable_logging(self):
+        return os.getenv("DISABLE_LOGGING", "false").lower() == "true"
+
     def resources(self) -> Optional[TaskResources]:
         return None
 
     def depends(self) -> Dependency:
         return []
+    
+    def log(self, data: Loggable):
+        """This function will accumulate logs """
+        if not self._disable_logging:
+            Log().log(data)
 
     def __call__(self):
         return self.run()

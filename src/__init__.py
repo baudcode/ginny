@@ -16,6 +16,7 @@ from .base import (
     encode_short,
     is_task,
 )
+from .log import Log, Loggable
 from .s3 import S3, S3DownloadTask, S3File, S3Obj, S3Target, S3UploadTask
 from .schedule import (
     NoResultException,
@@ -29,3 +30,4 @@ from .ssh import download_file as ssh_download_file
 from .ssh import get_client as get_ssh_client
 from .ssh import upload_file as ssh_upload_file
 from .utils import batching, download, get_files, logger, parallize
+
