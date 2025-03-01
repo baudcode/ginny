@@ -1,11 +1,14 @@
 from datetime import datetime
 from multiprocessing import Pool as ProcessPool
 from multiprocessing.pool import ThreadPool
-from typing import Dict, List
+from pathlib import Path
+from typing import Dict, List, Optional
 
 import networkx as nx
 
-from .base import Target, Task, is_task, to_list
+from .base import LocalTarget, Target, Task, is_task, to_list
+from .log import Log
+from .s3 import S3Target
 from .utils import logger
 
 
@@ -76,7 +79,11 @@ class NoResultException(Exception):
         super().__init__(f"[{task}] has not procuced target {target}")
 
 
-def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False, force: bool = False) -> Dict[Task, any]:
+def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False, force: bool = False, logfile: Optional[Path] = None) -> Dict[Task, any]:
+    """ Run a task and all its dependencies 
+    
+    logfile: if provided, will log all the outputs of the tasks to an html file as a summary
+    """
     g = schedule(task, force=force)
     order = create_execution_order(task, g)
 
@@ -108,11 +115,19 @@ def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False,
             logger.info(f"=> Running tasks with pool.map: {scheduled}")
             results = pool.map(lambda x: x.run(pool), scheduled)
 
+
             # check that all tasks have produced results
             for task in scheduled:
                 for target in to_list(task.target()):
                     if isinstance(target, Target) and not target.exists():
                         raise NoResultException(task, target=target)
+                    # log the target to the logfile
+                    elif isinstance(target, LocalTarget) and logfile:
+                        logger.debug(f"logging target {target} to {logfile}")
+                        Log().add_file(target.path, task=task)
+                    elif isinstance(target, S3Target) and logfile:
+                        logger.debug(f"logging target {target} to {logfile}")
+                        Log().add_s3_file(target.uri, task=task)
 
             for task, result in zip(scheduled, results):
                 all_results[task] = result
