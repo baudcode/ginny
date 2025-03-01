@@ -85,7 +85,7 @@ class S3ReadWrite:
 
 S3Obj = namedtuple('S3Obj', ['key', 'mtime', 'size', 'ETag'])
 
-
+@dataclass(frozen=True)
 class S3File(Comparable):
     bucket: str
     path: str
@@ -128,6 +128,7 @@ class S3File(Comparable):
     @classmethod
     def from_uri(cls, uri: str):
         bucket, path = S3.split_uri(uri)
+        print(bucket, path)
         return S3File(bucket, path)
 
     def exists(self):
@@ -351,10 +352,10 @@ class S3Config:
 
 
 def get_config() -> S3Config:
-    aws_access_key_id = os.environ['AWS_ACCESS_KEY_ID']
-    aws_secret_access_key = os.environ["AWS_SECRET_ACCESS_KEY"]
-    bucket = os.environ["S3_BUCKET"]
-
+    # TODO: test with only the aws profile
+    aws_access_key_id = os.getenv('AWS_ACCESS_KEY_ID')
+    aws_secret_access_key = os.getenv("AWS_SECRET_ACCESS_KEY")
+    bucket = os.getenv("S3_BUCKET")
     s3_region = os.getenv("S3_REGION", "eu-west-1")
 
     return S3Config(**{
