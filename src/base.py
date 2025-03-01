@@ -248,7 +248,7 @@ class Task(Comparable):
     def log(self, data: Loggable):
         """This function will accumulate logs """
         if not self._disable_logging:
-            Log().log(data)
+            Log().log(data, self)
 
     def __call__(self):
         return self.run()
