@@ -1,3 +1,4 @@
+import dataclasses
 from datetime import datetime
 from multiprocessing import Pool as ProcessPool
 from multiprocessing.pool import ThreadPool
@@ -78,14 +79,27 @@ class NoResultException(Exception):
         self.task = task
         super().__init__(f"[{task}] has not procuced target {target}")
 
+@dataclasses.dataclass(frozen=True)
+class WriteLogSummary(Task):
+    logfile: Path
 
-def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False, force: bool = False, logfile: Optional[Path] = None) -> Dict[Task, any]:
+    def run(self, *args, **kwargs):
+        logger.info(f"writing run to logfile {self.logfile}")
+        Log().save(self.logfile)
+        return self.logfile
+
+    def target(self):
+        return LocalTarget(self.logfile)
+
+def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False, force: bool = False, disable_logging: bool = False, logfile: Optional[Path] = None) -> Dict[Task, any]:
     """ Run a task and all its dependencies 
     
     logfile: if provided, will log all the outputs of the tasks to an html file as a summary
     """
     g = schedule(task, force=force)
     order = create_execution_order(task, g)
+    if logfile:
+        order.append([WriteLogSummary(logfile=logfile)])
 
     if debug:
         logger.debug("\n\n========= execution order =========")
@@ -122,15 +136,19 @@ def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False,
                     if isinstance(target, Target) and not target.exists():
                         raise NoResultException(task, target=target)
                     # log the target to the logfile
-                    elif isinstance(target, LocalTarget) and logfile:
-                        logger.debug(f"logging target {target} to {logfile}")
+                    elif isinstance(target, LocalTarget) and not disable_logging:
+                        logger.debug(f"logging target {target} to Log()")
                         Log().add_file(target.path, task=task)
-                    elif isinstance(target, S3Target) and logfile:
-                        logger.debug(f"logging target {target} to {logfile}")
+                    elif isinstance(target, S3Target) and not disable_logging:
+                        logger.debug(f"logging target {target} to Log()")
                         Log().add_s3_file(target.uri, task=task)
 
             for task, result in zip(scheduled, results):
                 all_results[task] = result
 
     logger.info(f"end => {datetime.now()} | elapsed: {(datetime.now() - start).total_seconds():.2f} seconds")
+    # if logfile:
+    #     logger.info(f"writing run to logfile {logfile}")
+    #     Log().save(logfile)
+
     return all_results

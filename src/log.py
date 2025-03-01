@@ -9,6 +9,7 @@ import dataclasses
 import datetime
 import importlib
 import io
+import json
 from multiprocessing import Lock, Manager
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
@@ -93,18 +94,23 @@ class Log:
     
     def _log_stream(self, data: io.BytesIO, path: str, context: Optional[LogContext] = None):
         ext = path.split(".")[-1].lower()
+        print("ext: ", ext)
 
-        if ext in [".csv", ".xlsx"]:
+        if ext in ["csv", "xlsx"]:
             self._log(pd.read_csv(data), context=context)
         if ext in ['parquet']:
             self._log(pd.read_parquet(data), context=context)
-        elif ext in [".jpg", ".jpeg", ".png"]:
+        elif ext in ["jpg", "jpeg", "png"]:
             self._log(Image.open(data), context=context)
-        elif ext in [".md"]:
+        elif ext in ["md"]:
             data = data.getvalue().decode("utf-8")
             self._log(Markdown(data, context=context))
-        elif ext in [".npy", "np"]:
+        elif ext in ["npy", "np"]:
             self._log(np.load(data), context=context)
+        elif ext in ['json']:
+            self._log(json.load(data), context=context)
+        elif ext in ['pkl', 'pickle']:
+            self._log(pd.read_pickle(data), context=context)
         else:
             logger.warning(f"file extension {ext} unknwon for {path}. reverting to plain text")
             data = data.getvalue().decode("utf-8")
@@ -150,6 +156,9 @@ class Log:
                         elem = image2html(obj)
                     elif isinstance(obj, Markdown):
                         elem = str(obj)
+                    elif isinstance(obj, dict):
+                        """ print as `pre`"""
+                        elem = f"<pre>{obj}</pre>"
                     elif isinstance(obj, datetime.date) or isinstance(obj, datetime.datetime):
                         elem = f"<p>{obj.isoformat()}</p>"
                     else:
@@ -172,6 +181,15 @@ class Log:
             <html>
             <head>
             <style>
+            pre {{
+                background-color: #2d2d2d;
+                color: #f8f8f2;
+                padding: 10px;
+                border-radius: 5px;
+                overflow: auto;
+                max-height: 300px;
+                white-space: pre-wrap;
+            }}
             .container {{
                 display: flex;
                 flex-direction: column;
