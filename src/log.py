@@ -8,6 +8,7 @@ except ImportError:
 import dataclasses
 import datetime
 import importlib
+import io
 from multiprocessing import Lock, Manager
 from pathlib import Path
 from typing import List, Optional, Tuple, Union
@@ -61,6 +62,9 @@ class Log:
     _loglist: List[Tuple[Loggable, Optional[LogContext]]]
     _lock = Lock()
 
+    def contains_task(self, task: "Task"):
+        return any([context.task == task for (_, context) in self._loglist])
+
     def __new__(cls, *args, **kwargs):
         with cls._lock:
             if not cls._instance:
@@ -80,29 +84,38 @@ class Log:
         else:
             context = LogContext(task=task)
             self._log(obj, context=context)
+        
+    def add_s3_file(self, uri: str, task: Optional["Task"] = None):
+        from src.s3 import S3File
+        context = LogContext(task=task)
+        stream = io.BytesIO(S3File.from_uri(uri).read())
+        self._log_stream(stream, uri, context=context)
+    
+    def _log_stream(self, data: io.BytesIO, path: str, context: Optional[LogContext] = None):
+        ext = path.split(".")[-1].lower()
+
+        if ext in [".csv", ".xlsx"]:
+            self._log(pd.read_csv(data), context=context)
+        if ext in ['parquet']:
+            self._log(pd.read_parquet(data), context=context)
+        elif ext in [".jpg", ".jpeg", ".png"]:
+            self._log(Image.open(data), context=context)
+        elif ext in [".md"]:
+            data = data.getvalue().decode("utf-8")
+            self._log(Markdown(data, context=context))
+        elif ext in [".npy", "np"]:
+            self._log(np.load(data), context=context)
+        else:
+            logger.warning(f"file extension {ext} unknwon for {path}. reverting to plain text")
+            data = data.getvalue().decode("utf-8")
+            self._log(data, context=context)
     
     def add_file(self, path: Union[str, Path], task: Optional["Task"] = None):
         # depending on the file extension, we can load the file as a pandas dataframe or an image, markdown, etc.
-        ext = Path(path).suffix.lower()
         context = LogContext(task=task, from_file=Path(path))
+        stream = io.BytesIO(Path(path).read_bytes())
+        self._log_stream(stream, str(Path(path).absolute()), context=context)
 
-        print("context for logging to file: ", context)
-
-        if ext in [".csv", ".xlsx"]:
-            self._log(pd.read_csv(path), context=context)
-        if ext in ['parquet']:
-            self._log(pd.read_parquet(path), context=context)
-        elif ext in [".jpg", ".jpeg", ".png"]:
-            self._log(Image.open(path), context=context)
-        elif ext in [".md"]:
-            with open(path, "r") as f:
-                self._log(Markdown(f.read()), context=context)
-        elif ext in [".npy", "np"]:
-            self._log(np.load(path), context=context)
-        else:
-            logger.warning(f"file extension {ext} unknwon for {path}. reverting to plain text")
-            with open(path, "r") as f:
-                self._log(f.read(), context=context)
 
     def save(self, filename):
         html_elements = []
