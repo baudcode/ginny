@@ -21,7 +21,7 @@ try:
 except ImportError:
     pass
 
-from src.utils import logger
+from .utils import logger
 
 
 def module_exists(module_name):
@@ -86,7 +86,7 @@ class Log:
             self._log(obj, context=context)
         
     def add_s3_file(self, uri: str, task: Optional["Task"] = None):
-        from src.s3 import S3File
+        from .s3 import S3File
         context = LogContext(task=task)
         stream = io.BytesIO(S3File.from_uri(uri).read())
         self._log_stream(stream, uri, context=context)
