@@ -22,6 +22,10 @@ from .schedule import (
 )
 
 
+def create_parameter_file(params: dict, path: Union[Path, str] = "params.yaml"):
+    with Path(path).open("w") as f:
+       yaml.dump(params, f)
+
 class Metadata(BaseModel):
     generateName: Optional[str] = None
     name: Optional[str] = None
@@ -239,7 +243,6 @@ class Workflow(BaseModel):
       workflow_dict = self.model_dump(exclude_none=True, by_alias=True)
       with open(path, "w") as f:
           f.write(yaml.dump(workflow_dict))
-
 
 
 
