@@ -7,8 +7,8 @@ from src.base import DynamicTask, IterableParameter, IterableParameterMap
 
 @dataclasses.dataclass(frozen=True)
 class A(Task):
-    order_id: str = GlobalVar("order_id")
     pano_id: str
+    order_id: str = GlobalVar("order_id")
 
     def run(self, *args, **kwargs):
         self.target().write_text("hello")

@@ -45,7 +45,7 @@ def get_path_lengths(root: Task, g: nx.Graph):
         yield node, len(nx.shortest_path(g, root, node))
 
 
-def create_execution_order(root: Task, g: nx.Graph) -> List[List[Task]]:
+def create_execution_order(root: Task, g: nx.Graph, logfile: Optional[Path] = None) -> List[List[Task]]:
     # put task into bins
     levels: List[List[Task]] = []
 
@@ -64,7 +64,12 @@ def create_execution_order(root: Task, g: nx.Graph) -> List[List[Task]]:
 
     levels.append(stage)
     levels = list(filter(lambda x: len(x) != 0, levels))
-    return list(reversed(levels))
+    levels = list(reversed(levels))
+
+    if logfile:
+        levels.append([WriteLogSummary(logfile=logfile)])
+
+    return levels
 
 
 class UnresolvedDependencyException(Exception):
@@ -97,9 +102,8 @@ def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False,
     logfile: if provided, will log all the outputs of the tasks to an html file as a summary
     """
     g = schedule(task, force=force)
-    order = create_execution_order(task, g)
-    if logfile:
-        order.append([WriteLogSummary(logfile=logfile)])
+    order = create_execution_order(task, g, logfile=logfile)
+   
 
     if debug:
         logger.debug("\n\n========= execution order =========")
@@ -135,6 +139,7 @@ def run(task: Task, PoolClass=ThreadPool, workers: int = 4, debug: bool = False,
                 for target in to_list(task.target()):
                     if isinstance(target, Target) and not target.exists():
                         raise NoResultException(task, target=target)
+                    
                     # log the target to the logfile
                     elif isinstance(target, LocalTarget) and not disable_logging:
                         logger.debug(f"logging target {target} to Log()")

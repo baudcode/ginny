@@ -28,8 +28,11 @@ def main():
     p.add_argument('--every', choices=weekdays + units + ["one_time"], default='one_time')
     p.add_argument('--count', type=int, default=None)
     p.add_argument('--to', type=int, default=None)
+    p.add_argument('--workers', type=int, default=4)
     p.add_argument('--debug', action="store_true")
     p.add_argument('--force', action="store_true")
+    p.add_argument('--disable_logging', action="store_true")
+    p.add_argument("--logfile", type=str, default=None)
     p.add_argument('--at', help='time of the day, if not set, executed at 0:00')
     p.add_argument('args', nargs=argparse.REMAINDER)
     args = p.parse_args()
@@ -62,8 +65,17 @@ def main():
     print(f"restored task {TaskClass}")
     task: Task = TaskClass(**task_args)
 
+    run_default_args = dict(
+        task=task,
+        debug=args.debug,
+        force=args.force,
+        disable_logging=args.disable_logging,
+        logfile=args.logfile,
+        workers=args.workers
+    )
+
     if args.every == 'one_time':
-        results = run(task, debug=args.debug, force=args.force)
+        results = run(**run_default_args)
         print(f"results: {results}")
     else:
         sched = schedule
@@ -79,7 +91,7 @@ def main():
         if args.at:
             sched = sched.at(args.at)
 
-        sched.do(lambda: run(task, debug=args.debug, force=args.force))
+        sched.do(lambda: run(**run_default_args))
         print("jobs: ", schedule.get_jobs())
 
         while True:
