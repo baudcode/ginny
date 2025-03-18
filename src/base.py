@@ -12,6 +12,8 @@ from pathlib import Path
 from timeit import default_timer
 from typing import Callable, Dict, List, Optional, Tuple, Union
 
+from pydantic import BaseModel, Field
+
 from .docker import Container
 from .log import Log, Loggable
 from .utils import download, logger
@@ -223,11 +225,13 @@ def depedendencies_resolved(deps: Dependency) -> bool:
 
     return all(o.exists() if isinstance(o, Target) else o.done() for o in deps)
 
-@dataclasses.dataclass
-class TaskResources:
+class TaskResources(BaseModel):
     """ resources required for a task (used by argo workflow) """
     cpu: str
     memory: str
+
+class NodeSelector(BaseModel):
+    node_name: str = Field(alias="node-name") # node-name: g5xlarge-spot
 
 def is_task(o: any) -> bool:
     return hasattr(o, "__call__") and hasattr(o, "target") and hasattr(o, "depends") and hasattr(o, "run") and hasattr(o, "done") and hasattr(o, "runnable")       
@@ -235,11 +239,20 @@ def is_task(o: any) -> bool:
 @dataclasses.dataclass(frozen=True)
 class Task(Comparable):
 
+    def _is_generator_task(self):
+        if hasattr(self, "_is_dyanmic"):
+            return False
+        targets = to_list(self.target())
+        return any(isinstance(t, IterableParameterMap) for t in targets)
+
     @property
     def _disable_logging(self):
         return os.getenv("DISABLE_LOGGING", "false").lower() == "true"
 
     def resources(self) -> Optional[TaskResources]:
+        return None
+
+    def node_selector(self) -> Optional[NodeSelector]:
         return None
 
     def depends(self) -> Dependency:
@@ -761,6 +774,12 @@ class DynamicTask(Task):
         if not all(t.exists() for t in iterable_targets):
             return False
         return super().done()
+
+    def parameters_resolved(self):
+        try:
+            self._tasks()
+        except Exception as e:
+            return False
 
     def _tasks(self, debug=False):
         target: List[Union[IterableParameter, IterableParameterMap]] = to_list(self._parameter_list)

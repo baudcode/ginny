@@ -90,9 +90,15 @@ class Resources(BaseModel):
     limits: Optional[Limits] = None
     requests: dict = {}
 
+
+class NodeSelector(BaseModel):
+    node_name: str = Field(alias="node-name") # node-name: g5xlarge-spot
+
+
 class ArgoConfig(BaseModel):
     storage: S3StorageConfig
     namespace: str = "argo"
+    nodeSelector: Optional[NodeSelector] = None
     serviceAccountName: str = "argo-workflow"
     resources: Resources = Resources(limits=Limits(cpu="1", memory="1Gi"))
 
@@ -197,9 +203,6 @@ class DagTask(BaseModel):
 
 class Dag(BaseModel):
     tasks: List[DagTask]
-
-class NodeSelector(BaseModel):
-    node_name: str = Field(alias="node-name") # node-name: g5xlarge-spot
 
 class Template(BaseModel):
     name: str
@@ -490,6 +493,7 @@ def _to_template(
         depends: List[Target], 
         storage_config: S3StorageConfig,
         resources: Resources = Resources(limits=Limits(cpu="1", memory="1Gi")),
+        node_selector: Optional[NodeSelector] = None,
         base_image: str = "python:3.9") -> Template:
     # global and local parameters for templates (values get supplied by DAG task)
     input_parameters = [Parameter(name=k, value=None) for k, v in args.items()]
@@ -526,6 +530,7 @@ def _to_template(
         outputs=Inputs(artifacts=output_artifacts, parameters=output_parameters) if output_artifacts or output_parameters else None,
         inputs=Inputs(artifacts=input_artifacts, parameters=input_parameters),
         container=Container(image=base_image, command=command, args=command_args, resources=resources),
+        nodeSelector=node_selector
     )
 
 def task_to_template(workflow_name: str, t: Task, config: ArgoConfig, base_image: str = "python:3.9") -> Template:
@@ -536,9 +541,10 @@ def task_to_template(workflow_name: str, t: Task, config: ArgoConfig, base_image
     targets = to_list(t.target())
     depends = to_list(t.depends())
     task_resources = t.resources()
+    node_selector = t.node_selector() or config.nodeSelector
     resources = Resources(limits=Limits(cpu=task_resources.cpu, memory=task_resources.memory)) if task_resources else config.resources
 
-    return _to_template(workflow_name, task_name, task_id, task_class, args, targets, depends, config.storage, resources=resources, base_image=base_image)
+    return _to_template(workflow_name, task_name, task_id, task_class, args, targets, depends, config.storage, resources=resources, base_image=base_image, node_selector=node_selector)
 
 def get_paramerized_task_from_dynamic_task(t: DynamicTask) -> Task:
     task_class = t.taskclass
@@ -560,10 +566,11 @@ def dynamic_task_to_template(workflow_name: str, t: DynamicTask, config: ArgoCon
     targets = to_list(parameterized_task.target())
 
     task_resources = parameterized_task.resources()
+    node_selector = t.node_selector() or config.nodeSelector
     resources = Resources(limits=Limits(cpu=task_resources.cpu, memory=task_resources.memory)) if task_resources else config.resources
 
     task_id = parameterized_task.id
-    template = _to_template(workflow_name, task_name, task_id, task_class, task_args, targets, depends, config.storage, resources=resources, base_image=base_image)
+    template = _to_template(workflow_name, task_name, task_id, task_class, task_args, targets, depends, config.storage, resources=resources, base_image=base_image, node_selector=node_selector)
     return template
 
 def _get_dynamic_task_name(t: DynamicTask) -> str:
